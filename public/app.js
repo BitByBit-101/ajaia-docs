@@ -107,7 +107,6 @@ function setUser(user) {
   state.user = user;
   $('userName').textContent = `${user.name} (${user.email})`;
   $('userbox').hidden = false;
-  connectUserEvents();
 }
 
 $('logoutBtn').addEventListener('click', async () => {
@@ -119,8 +118,9 @@ $('logoutBtn').addEventListener('click', async () => {
 });
 
 // Dashboard-level pushes: shared with you, access removed, renamed, deleted.
+// Only open on the dashboard so each tab holds a single live connection (HTTP/1.1 allows 6 per site).
 function connectUserEvents() {
-  disconnectUserEvents();
+  if (state.userEvents) return;
   const es = new EventSource('/api/events');
   state.userEvents = es;
   es.addEventListener('docs', (e) => {
@@ -255,8 +255,15 @@ function metaText(owner, updatedAt) {
 function refreshStatus() {
   const s = state.session;
   if (!s || s.broken || s.doc.role === 'viewer') return;
-  if (!s.ot.idle) setStatus('Saving...');
-  else {
+  if (!s.ot.idle) {
+    // Saves normally land within one round trip; only show "Saving..." if one is slow.
+    s.savingTimer ??= setTimeout(() => {
+      s.savingTimer = null;
+      if (isActive(s) && !s.ot.idle && !s.broken) setStatus('Saving...');
+    }, 700);
+  } else {
+    clearTimeout(s.savingTimer);
+    s.savingTimer = null;
     setStatus('All changes saved');
     $('docMeta').textContent = metaText(s.doc.owner, new Date().toISOString());
   }
@@ -274,16 +281,21 @@ function onLocalChange(delta) {
   s.ot.applyLocal(delta);
   shiftCursors(delta);
   refreshStatus();
-  scheduleSend(s, 60);
+  scheduleSend(s);
   scheduleCursor(s);
 }
 
-function scheduleSend(s, ms) {
-  if (!s.sendTimer && !s.closed) s.sendTimer = setTimeout(() => sendBuffer(s), ms);
+// Keystrokes typed while a change is in flight batch up in the buffer, so no timer is needed.
+function scheduleSend(s) {
+  if (s.sendQueued || s.closed) return;
+  s.sendQueued = true;
+  queueMicrotask(() => {
+    s.sendQueued = false;
+    sendBuffer(s);
+  });
 }
 
 async function sendBuffer(s) {
-  s.sendTimer = null;
   if (s.closed || s.broken || !s.ot.takeSend()) return maybeClose(s);
   await postPending(s);
 }
@@ -310,7 +322,7 @@ function onServerOp(s, entry) {
   if (s.broken) return;
   const result = s.ot.receive(entry);
   if (result.type === 'gap') return isActive(s) ? resync('Fell out of sync.') : closeSession(s);
-  if (result.type === 'ack' && s.ot.buffer) scheduleSend(s, 0);
+  if (result.type === 'ack' && s.ot.buffer) scheduleSend(s);
   if (result.type === 'remote' && isActive(s)) {
     state.quill.updateContents(result.delta, 'api');
     shiftCursors(result.delta);
@@ -458,7 +470,7 @@ function closeSession(s) {
   if (!s || s.closed) return;
   s.closed = true;
   if (s.events) s.events.close();
-  clearTimeout(s.sendTimer);
+  clearTimeout(s.savingTimer);
 }
 
 /** Detach the open document from the UI without waiting; unsent edits finish in the background. */
@@ -564,7 +576,7 @@ async function openDoc(id) {
     doc: { id: doc.id, role, owner, title: doc.title },
     ot: new OTClient({ Delta, version: doc.version, clientId: state.clientId }),
     events: null,
-    sendTimer: null,
+    sendQueued: false,
     broken: false,
     closing: false,
     closed: false,
@@ -736,10 +748,12 @@ function route() {
   if (!state.user) return;
   const m = location.hash.match(/^#\/doc\/(.+)$/);
   if (m) {
+    disconnectUserEvents();
     openDoc(decodeURIComponent(m[1]));
   } else {
     leaveDoc();
     state.openSeq++;
+    connectUserEvents();
     showList();
   }
 }
