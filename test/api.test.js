@@ -157,6 +157,29 @@ test('imports markdown into a new sanitized document and rejects unsupported fil
   assert.equal((await alice('POST', '/api/documents/import', fakeDocx)).status, 400);
 });
 
+test('presence shows other active collaborators and the latest version', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const bob = await loginAs('bob@ajaia.dev');
+  const carol = await loginAs('carol@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', { title: 'Live doc' });
+  const id = body.document.id;
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'bob@ajaia.dev', role: 'editor' });
+
+  assert.deepEqual((await alice('POST', `/api/documents/${id}/presence`)).body.active, []);
+  await bob('POST', `/api/documents/${id}/presence`);
+  await bob('PATCH', `/api/documents/${id}`, { content: delta('from bob') });
+
+  const seen = await alice('POST', `/api/documents/${id}/presence`);
+  assert.deepEqual(seen.body.active.map((a) => [a.user.id, a.role]), [['u_bob', 'editor']]);
+  assert.equal(seen.body.version, body.document.version + 1);
+
+  // Users without access can't see who is in a document.
+  assert.equal((await carol('POST', `/api/documents/${id}/presence`)).status, 404);
+
+  await bob('DELETE', `/api/documents/${id}/presence`);
+  assert.deepEqual((await alice('POST', `/api/documents/${id}/presence`)).body.active, []);
+});
+
 test('store persists documents and shares to disk across restarts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ajaia-docs-'));
   const file = path.join(dir, 'db.json');

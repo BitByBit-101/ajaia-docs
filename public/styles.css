@@ -79,6 +79,11 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: v
 .editor-actions { display: flex; gap: 6px; }
 .doc-meta { margin: 4px 0 12px 8px; }
 .save-status.error { color: var(--danger); }
+.presence { display: flex; gap: 4px; align-items: center; }
+.avatar {
+  width: 28px; height: 28px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; border: 2px solid var(--card);
+}
 
 .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; background: #fef3c7; color: #78350f; display: flex; gap: 12px; align-items: center; }
 .banner.danger { background: #fdecec; color: #7f1d1d; }

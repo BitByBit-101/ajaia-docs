@@ -22,13 +22,14 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 4. **404 for no access.** This avoids leaking whether a document ID exists.
 5. **Optimistic concurrency instead of real-time collaboration.** Each save sends `baseVersion`. A mismatch returns `409` and the UI blocks further edits until a reload. This prevents silent lost updates when two people edit the same document, without the cost of CRDT/OT and WebSockets.
 6. **Serialized client save queue.** Title and content changes go through a single `flushSave()`, so version numbers never race against each other.
-7. **Validation at the boundary:** title length and emptiness, Delta shape (insert-only ops, op-count cap), JSON body size (2 MB), upload size (2 MB), file-extension allowlist, `.docx` magic-byte check, and share role allowlist. Errors return consistent `{error}` JSON, which the UI shows as toasts or inline messages.
+7. **Presence + live pickup via polling (stretch).** Every 4 s the client sends a heartbeat. The server keeps an in-memory `docId → {userId: lastSeen}` map with a 12 s TTL and returns the other active users plus the current version. If the server version is newer and you have no unsaved edits, the client loads the new version in place and keeps your cursor. If you do have edits, the existing `409` path protects them. I chose polling over WebSockets because it works on any host (including free tiers that sleep), reuses the same auth and access checks, and is about 80 lines.
+8. **Validation at the boundary:** title length and emptiness, Delta shape (insert-only ops, op-count cap), JSON body size (2 MB), upload size (2 MB), file-extension allowlist, `.docx` magic-byte check, and share role allowlist. Errors return consistent `{error}` JSON, which the UI shows as toasts or inline messages.
 
 ## Deliberately cut
 
 | Cut | Why |
 |-----|-----|
-| Real-time co-editing (CRDT/OT, presence) | The biggest cost and risk. Conflict detection covers correctness for this scope. |
+| Character-level real-time co-editing (CRDT/OT, live cursors) | The biggest cost and risk. Presence + live pickup of saves + conflict detection give most of the value for this scope. |
 | Real auth (passwords, OAuth) | The brief allows mocking it. Seeded users make the reviewer flow faster. |
 | Sharing with arbitrary emails / invites | Sharing is limited to existing (seeded) users. |
 | Comments, version history, export | Optional stretch items, not core. |
@@ -46,5 +47,5 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 1. Move `Store` to Postgres (Neon or Supabase free tier): `users`, `documents(content jsonb, version)`, `shares(doc_id, user_id, role)`. Same interface, durable on the free host.
 2. Version history: snapshot the Delta on each save (throttled), plus a restore UI.
 3. Export to Markdown/PDF and "import into the current document".
-4. Presence indicator ("Bob is viewing") through polling or SSE, as a step toward real-time.
+4. Upgrade polling to SSE/WebSockets and add Yjs for true simultaneous editing with live cursors.
 5. Browser end-to-end test (Playwright) for the editor UI.

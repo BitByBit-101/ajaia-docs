@@ -201,6 +201,32 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     res.json({ shares: shareView(req.doc.id) });
   });
 
+  // Presence is ephemeral (in memory): docId -> Map(userId -> lastSeen ms).
+  const presence = new Map();
+  const PRESENCE_TTL_MS = 12000;
+
+  app.post('/api/documents/:id/presence', requireUser, loadDoc('viewer'), (req, res) => {
+    const now = Date.now();
+    let seen = presence.get(req.doc.id);
+    if (!seen) presence.set(req.doc.id, (seen = new Map()));
+    seen.set(req.user.id, now);
+    const active = [];
+    for (const [userId, at] of seen) {
+      if (now - at > PRESENCE_TTL_MS) seen.delete(userId);
+      else if (userId !== req.user.id) {
+        const user = store.getUser(userId);
+        if (user) active.push({ user, role: store.getRole(req.doc, userId) });
+      }
+    }
+    res.json({ active, version: req.doc.version, title: req.doc.title });
+  });
+
+  app.delete('/api/documents/:id/presence', requireUser, (req, res) => {
+    const seen = presence.get(req.params.id);
+    if (seen) seen.delete(req.user.id);
+    res.status(204).end();
+  });
+
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found.')));

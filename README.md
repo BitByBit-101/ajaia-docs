@@ -22,6 +22,8 @@ Click a user on the sign-in screen. Use **Switch user** (top right) to change ac
 - **Sharing:** the owner grants access by user with **Can edit** or **Can view**, changes roles, and revokes access. The dashboard separates **My documents** from **Shared with me** and shows role badges. Viewers get a read-only editor.
 - **Persistence:** documents (stored as Quill Delta JSON) and shares are written to a JSON file and survive a refresh or server restart.
 - **Conflict safety:** saves carry a `baseVersion`. A stale save returns `409`, and the UI asks you to reload instead of silently overwriting someone else's changes.
+- **Live collaboration indicators (stretch):** avatars show who else has the document open. If another user saves while you have no unsaved edits, their version loads in place within about 4 seconds, no refresh needed. This uses lightweight polling, not WebSockets.
+- **Sample files** for import demos live in `samples/` (`.docx`, `.md`, `.txt`, and an unsupported `.pdf`).
 
 ## Run locally
 
@@ -78,5 +80,6 @@ test/
 | DELETE | `/api/documents/:id` | owner |
 | GET/PUT | `/api/documents/:id/shares` `{email, role}` | owner |
 | DELETE | `/api/documents/:id/shares/:userId` | owner |
+| POST/DELETE | `/api/documents/:id/presence` (heartbeat → `{active, version}`) | owner / editor / viewer |
 
 Users without access get `404` (not `403`) so document IDs can't be probed.

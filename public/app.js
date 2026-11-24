@@ -12,6 +12,7 @@ const state = {
   saving: false,
   conflict: false,
   saveTimer: null,
+  presenceTimer: null,
 };
 
 // ---------- helpers ----------
@@ -107,6 +108,8 @@ function setUser(user) {
 
 $('logoutBtn').addEventListener('click', async () => {
   await flushSave();
+  leaveDoc();
+  state.doc = null;
   await api('/api/logout', { method: 'POST' });
   location.hash = '#/';
   showLogin();
@@ -272,8 +275,78 @@ function metaText(owner, updatedAt) {
   return `Owner: ${owner.name} · Last saved ${new Date(updatedAt).toLocaleString()}`;
 }
 
+// ---------- presence + remote changes (polling) ----------
+
+const AVATAR_COLORS = ['#2563eb', '#db2777', '#059669', '#d97706', '#7c3aed'];
+
+function renderPresence(active) {
+  $('presence').replaceChildren(
+    ...active.map(({ user, role }) => {
+      const initials = user.name.split(' ').map((p) => p[0]).join('').slice(0, 2);
+      const color = AVATAR_COLORS[[...user.id].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length];
+      const label = `${user.name} is here (${roleLabel[role] || role})`;
+      return el('span', { class: 'avatar', title: label, 'aria-label': label, style: `background:${color}` }, initials);
+    }),
+  );
+}
+
+function stopPresence() {
+  clearInterval(state.presenceTimer);
+  state.presenceTimer = null;
+  $('presence').replaceChildren();
+}
+
+async function heartbeat() {
+  const doc = state.doc;
+  if (!doc) return;
+  let data;
+  try {
+    data = await api(`/api/documents/${encodeURIComponent(doc.id)}/presence`, { method: 'POST' });
+  } catch (e) {
+    if (e.status === 404 && state.doc === doc) {
+      stopPresence();
+      state.conflict = true;
+      state.quill.enable(false);
+      showBanner('You no longer have access to this document.', { danger: true, action: { label: 'Back to documents', onClick: () => (location.hash = '#/') } });
+    }
+    return;
+  }
+  if (state.doc !== doc) return;
+  renderPresence(data.active);
+  const idle = !state.dirty && !state.saving && state.pendingTitle === null && !state.conflict;
+  if (data.version > doc.version && idle) await pullLatest(doc);
+}
+
+// Someone else saved and we have no local edits: load their version in place.
+async function pullLatest(doc) {
+  const { document: latest } = await api(`/api/documents/${encodeURIComponent(doc.id)}`);
+  if (state.doc !== doc || state.dirty || state.saving || !latest.content) return;
+  const quill = state.quill;
+  const sel = quill.getSelection();
+  quill.setContents(latest.content, 'silent');
+  if (sel) quill.setSelection(Math.min(sel.index, quill.getLength() - 1), 0, 'silent');
+  doc.version = latest.version;
+  doc.title = latest.title;
+  if (document.activeElement !== $('titleInput')) $('titleInput').value = latest.title;
+  $('docMeta').textContent = metaText(doc.owner, latest.updatedAt);
+  setStatus('Updated with latest changes');
+}
+
+function startPresence() {
+  stopPresence();
+  heartbeat();
+  state.presenceTimer = setInterval(heartbeat, 4000);
+}
+
+function leaveDoc() {
+  const doc = state.doc;
+  stopPresence();
+  if (doc) fetch(`/api/documents/${encodeURIComponent(doc.id)}/presence`, { method: 'DELETE', keepalive: true }).catch(() => {});
+}
+
 async function openDoc(id) {
   await flushSave();
+  leaveDoc();
   showView('editorView');
   const quill = getQuill();
   state.doc = null;
@@ -318,6 +391,7 @@ async function openDoc(id) {
   if (!canEdit) showBanner(`You have view-only access. Ask ${owner.name} for edit access.`);
   setStatus(canEdit ? 'All changes saved' : '');
   if (canEdit && quill.getLength() <= 1) quill.focus();
+  startPresence();
 }
 
 function commitTitle() {
@@ -352,6 +426,7 @@ $('deleteBtn').addEventListener('click', async () => {
   if (!doc || !confirm(`Delete "${doc.title}"? This cannot be undone.`)) return;
   try {
     clearTimeout(state.saveTimer);
+    leaveDoc();
     state.doc = null;
     await api(`/api/documents/${encodeURIComponent(doc.id)}`, { method: 'DELETE' });
     toast('Document deleted');
@@ -363,6 +438,7 @@ $('deleteBtn').addEventListener('click', async () => {
 });
 
 window.addEventListener('beforeunload', (e) => {
+  leaveDoc();
   if (state.dirty || state.saving || state.pendingTitle !== null) {
     flushSave();
     e.preventDefault();
@@ -462,6 +538,7 @@ async function route() {
     openDoc(decodeURIComponent(m[1]));
   } else {
     await flushSave();
+    leaveDoc();
     state.doc = null;
     showList();
   }
