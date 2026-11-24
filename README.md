@@ -2,7 +2,7 @@
 
 A lightweight collaborative document editor: create, edit (rich text), rename, import files, and share documents with other users using owner / editor / viewer roles.
 
-**Live demo:** https://ajaia-docs-0sxe.onrender.com  ·  **Walkthrough video:** see `VIDEO_URL.txt`
+**Live demo:** https://ajaia-docs-0sxe.onrender.com  ·  **Walkthrough video:** https://www.loom.com/share/7fe09118815d4c09bc9fcceea63c12b6
 
 > Hosted on Render's free tier: the first load after ~15 min idle takes ~30 s to wake up, and data resets to the demo documents on restart.
 

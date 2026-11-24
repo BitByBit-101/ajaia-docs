@@ -2,7 +2,7 @@
 
 **Live URL:** https://ajaia-docs-0sxe.onrender.com (free tier: first load after idle takes ~30 s)
 **Source:** https://github.com/BitByBit-101/ajaia-docs
-**Walkthrough video:** `<VIDEO_URL>` (also in `VIDEO_URL.txt`)
+**Walkthrough video:** https://www.loom.com/share/7fe09118815d4c09bc9fcceea63c12b6 (also in `VIDEO_URL.txt`)
 **Demo accounts (no password):** alice@ajaia.dev, bob@ajaia.dev, carol@ajaia.dev. Pick one on the sign-in screen.
 
 ## Included
