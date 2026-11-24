@@ -26,6 +26,7 @@
 - **Fixed a bug the fuzz test found.** A buffered edit can be transformed into a no-op, for example formatting text someone else just deleted, and the server rejected empty changes. The client now drops no-ops and the server tolerates them.
 - **Extracted the OT client into a shared module** so the exact browser logic runs in the Node fuzz test.
 - **Replaced a flaky browser stress test with a deterministic fuzz test.** The headless browser throttled timers in hidden tabs, so I moved convergence testing into Node where it's reproducible by seed.
+- **Restricted who can post a cursor.** Browser testing showed that a cursor posted from a tab with no open connection would never be cleaned up. The server now accepts cursors only from tabs with a live stream.
 - **Made `/api/users` public** after noticing the login screen needed it before sign-in. It exposes only seeded demo names and emails.
 - **Changed no-access responses from `403` to `404`.** This stops anyone from probing whether a document ID exists.
 

@@ -310,6 +310,37 @@ test('real-time: changes are pushed to other editors over Server-Sent Events', a
   assert.equal(data.clientId, 'other-tab');
 });
 
+test('remote cursors are broadcast and stay on the same text as others edit', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const bob = await loginAs('bob@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', { content: { ops: [{ insert: 'Hello world\n' }] } });
+  const id = body.document.id;
+  const v = body.document.version;
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'bob@ajaia.dev', role: 'editor' });
+
+  const bobStream = await openStream(bob.cookie, `/api/documents/${id}/events?since=${v}&clientId=bob-tab`);
+  const aliceStream = await openStream(alice.cookie, `/api/documents/${id}/events?since=${v}&clientId=alice-tab`);
+
+  // Alice selects "world" (index 6, length 5).
+  assert.equal((await alice('POST', `/api/documents/${id}/cursor`, { clientId: 'alice-tab', version: v, index: 6, length: 5 })).status, 204);
+  const c1 = await bobStream.next('cursor');
+  assert.deepEqual([c1.clientId, c1.user.name, c1.index, c1.length], ['alice-tab', 'Alice Chen', 6, 5]);
+
+  // Bob types at the start; a late cursor report based on the old version is shifted too.
+  await bob('POST', `/api/documents/${id}/ops`, { baseVersion: v, clientId: 'bob-tab', seq: 1, ops: [{ insert: 'Oh, ' }] });
+  await alice('POST', `/api/documents/${id}/cursor`, { clientId: 'alice-tab', version: v, index: 6, length: 5 });
+  const c2 = await bobStream.next('cursor');
+  assert.deepEqual([c2.index, c2.length], [10, 5]);
+
+  // Bob reconnecting gets Alice's (shifted) cursor immediately; Alice leaving removes it.
+  const bob2 = await openStream(bob.cookie, `/api/documents/${id}/events?clientId=bob-tab-2`);
+  assert.equal((await bob2.next('cursor')).index, 10);
+  aliceStream.close();
+  assert.equal((await bobStream.next('cursor-leave')).clientId, 'alice-tab');
+  bobStream.close();
+  bob2.close();
+});
+
 test('store persists documents and shares to disk across restarts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ajaia-docs-'));
   const file = path.join(dir, 'db.json');

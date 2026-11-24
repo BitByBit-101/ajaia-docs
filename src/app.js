@@ -201,6 +201,12 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     res.json({ users: hub.presence(req.doc.id) });
   });
 
+  app.post('/api/documents/:id/cursor', requireUser, loadDoc('viewer'), (req, res) => {
+    const { clientId, version, index, length = 0 } = req.body || {};
+    hub.setCursor(req.doc, req.user, { clientId, version, index, length });
+    res.status(204).end();
+  });
+
   app.get('/api/events', requireUser, (req, res) => hub.subscribeUser(req, res));
 
   app.delete('/api/documents/:id', requireUser, loadDoc('owner'), (req, res) => {

@@ -223,7 +223,12 @@ function getQuill() {
   });
   state.quill.on('text-change', (delta, _old, source) => {
     if (source === 'user') onLocalChange(delta);
+    renderCursors();
   });
+  state.quill.on('selection-change', (range) => {
+    if (range && state.session) scheduleCursor(state.session);
+  });
+  window.addEventListener('resize', renderCursors);
   return state.quill;
 }
 
@@ -267,8 +272,10 @@ function onLocalChange(delta) {
   const s = state.session;
   if (!s || s.broken || s.doc.role === 'viewer') return;
   s.ot.applyLocal(delta);
+  shiftCursors(delta);
   refreshStatus();
   scheduleSend(s, 60);
+  scheduleCursor(s);
 }
 
 function scheduleSend(s, ms) {
@@ -304,16 +311,122 @@ function onServerOp(s, entry) {
   const result = s.ot.receive(entry);
   if (result.type === 'gap') return isActive(s) ? resync('Fell out of sync.') : closeSession(s);
   if (result.type === 'ack' && s.ot.buffer) scheduleSend(s, 0);
-  if (result.type === 'remote' && isActive(s)) state.quill.updateContents(result.delta, 'api');
+  if (result.type === 'remote' && isActive(s)) {
+    state.quill.updateContents(result.delta, 'api');
+    shiftCursors(result.delta);
+  }
   if (result.type !== 'ignore' && isActive(s) && s.ot.idle) refreshStatus();
+  if (s.ot.idle && s.cursorDirty) scheduleCursor(s);
   maybeClose(s);
 }
 
+// ---------- remote cursors ----------
+// Our cursor is only sent when we have no unacknowledged edits, so its position is in server
+// coordinates; the server then shifts it through any edits it hasn't been through yet.
+
+function scheduleCursor(s) {
+  if (s.cursorTimer || s.closed || !isActive(s)) return;
+  s.cursorTimer = setTimeout(() => {
+    s.cursorTimer = null;
+    sendCursor(s);
+  }, 80);
+}
+
+function sendCursor(s) {
+  const range = isActive(s) && state.quill.getSelection();
+  if (!range || s.closed) return;
+  if (!s.ot.idle) {
+    s.cursorDirty = true;
+    return;
+  }
+  s.cursorDirty = false;
+  api(docUrl(s.doc.id, '/cursor'), {
+    method: 'POST',
+    body: { clientId: state.clientId, version: s.ot.version, index: range.index, length: range.length },
+  }).catch(() => {});
+}
+
+const remoteCursors = new Map(); // clientId -> { user, index, length, movedAt }
+
+function shiftRange(c, delta) {
+  const end = delta.transformPosition(c.index + c.length);
+  c.index = delta.transformPosition(c.index);
+  c.length = Math.max(0, end - c.index);
+}
+
+function shiftCursors(delta) {
+  for (const c of remoteCursors.values()) shiftRange(c, delta);
+  renderCursors();
+}
+
+function onRemoteCursor(s, data) {
+  if (data.clientId === state.clientId || !isActive(s)) return;
+  const c = { user: data.user, index: data.index, length: data.length, movedAt: Date.now() };
+  // Server coordinates -> our view, which also contains our unacknowledged edits.
+  if (s.ot.pending) shiftRange(c, s.ot.pending);
+  if (s.ot.buffer) shiftRange(c, s.ot.buffer);
+  remoteCursors.set(data.clientId, c);
+  renderCursors();
+  setTimeout(renderCursors, 3100);
+}
+
+function cursorLayer() {
+  let layer = state.quill.container.querySelector('.cursor-layer');
+  if (!layer) {
+    layer = el('div', { class: 'cursor-layer', 'aria-hidden': 'true' });
+    state.quill.container.append(layer);
+  }
+  return layer;
+}
+
+function renderCursors() {
+  if (!state.quill) return;
+  const quill = state.quill;
+  const max = Math.max(0, quill.getLength() - 1);
+  const nodes = [];
+  for (const c of remoteCursors.values()) {
+    const color = colorFor(c.user.id);
+    const index = Math.min(c.index, max);
+    const length = Math.min(c.length, max - index);
+    if (length > 0) {
+      for (const line of quill.getLines(index, length)) {
+        const start = Math.max(index, quill.getIndex(line));
+        const end = Math.min(index + length, quill.getIndex(line) + line.length() - 1);
+        if (end <= start) continue;
+        const b = quill.getBounds(start, end - start);
+        if (b) nodes.push(el('div', { class: 'remote-selection', style: `left:${b.left}px;top:${b.top}px;width:${b.width}px;height:${b.height}px;background:${color}` }));
+      }
+    }
+    const b = quill.getBounds(index + length, 0);
+    if (!b) continue;
+    const recent = Date.now() - c.movedAt < 3000;
+    nodes.push(
+      el(
+        'div',
+        { class: 'remote-caret', style: `left:${b.left}px;top:${b.top}px;height:${b.height}px;background:${color}` },
+        el('span', { class: `remote-label${recent ? '' : ' faded'}`, style: `background:${color}` }, c.user.name.split(' ')[0]),
+      ),
+    );
+  }
+  cursorLayer().replaceChildren(...nodes);
+}
+
+function clearCursors() {
+  remoteCursors.clear();
+  if (state.quill) cursorLayer().replaceChildren();
+}
+
 function connectEvents(s) {
-  const es = new EventSource(docUrl(s.doc.id, `/events?since=${s.ot.version}`));
+  const es = new EventSource(docUrl(s.doc.id, `/events?since=${s.ot.version}&clientId=${encodeURIComponent(state.clientId)}`));
   s.events = es;
   const on = (name, fn) => es.addEventListener(name, (e) => !s.closed && fn(JSON.parse(e.data)));
   on('op', (entry) => onServerOp(s, entry));
+  on('cursor', (data) => onRemoteCursor(s, data));
+  on('cursor-leave', ({ clientId }) => {
+    if (!isActive(s)) return;
+    remoteCursors.delete(clientId);
+    renderCursors();
+  });
   on('presence', ({ users }) => isActive(s) && renderPresence(users));
   on('title', ({ title }) => {
     s.doc.title = title;
@@ -373,13 +486,14 @@ function resync(reason) {
 // ---------- presence ----------
 
 const AVATAR_COLORS = ['#2563eb', '#db2777', '#059669', '#d97706', '#7c3aed'];
+const colorFor = (userId) => AVATAR_COLORS[[...userId].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length];
 
 function renderPresence(users) {
   const others = users.filter((p) => !state.user || p.user.id !== state.user.id);
   $('presence').replaceChildren(
     ...others.map(({ user, role, editing }) => {
       const initials = user.name.split(' ').map((p) => p[0]).join('').slice(0, 2);
-      const color = AVATAR_COLORS[[...user.id].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length];
+      const color = colorFor(user.id);
       const status = editing ? 'editing' : role === 'viewer' ? 'viewing' : 'here';
       const label = `${user.name} is ${status === 'here' ? 'here' : status} (${roleLabel[role] || role})`;
       return el(
@@ -405,6 +519,7 @@ function resetEditorUi() {
   $('docMeta').textContent = 'Loading...';
   $('banner').hidden = true;
   $('presence').replaceChildren();
+  clearCursors();
   setStatus('');
   quill.getModule('toolbar').container.hidden = true;
   quill.setContents([], 'silent');
@@ -473,6 +588,7 @@ async function openDoc(id) {
   setStatus(canEdit ? 'All changes saved' : '');
   if (canEdit && quill.getLength() <= 1) quill.focus();
   connectEvents(s);
+  scheduleCursor(s);
 }
 
 // ---------- title ----------

@@ -46,6 +46,7 @@ class CollabHub {
     this.subscribers = new Map(); // docId -> Set<res>
     this.editing = new Map(); // `${docId}:${userId}` -> timeout clearing the "editing" flag
     this.userStreams = new Map(); // userId -> Set<res>
+    this.cursors = new Map(); // docId -> Map(clientId -> { clientId, user, index, length })
   }
 
   submit(doc, { baseVersion, ops, clientId, seq, userId }) {
@@ -78,8 +79,38 @@ class CollabHub {
     if (log.length > MAX_LOG) log.splice(0, log.length - MAX_LOG);
     this.logs.set(doc.id, log);
     this.#broadcast(doc.id, 'op', entry, entry.version);
+    // Keep stored cursors pointing at the same text after this change.
+    for (const c of this.cursors.get(doc.id)?.values() ?? []) {
+      const end = change.transformPosition(c.index + c.length);
+      c.index = change.transformPosition(c.index);
+      c.length = Math.max(0, end - c.index);
+    }
     if (userId) this.#markEditing(doc.id, userId);
     return entry;
+  }
+
+  /** Record a tab's cursor (given at `version`), shift it to the current version, and broadcast. */
+  setCursor(doc, user, { clientId, version, index, length }) {
+    if (typeof clientId !== 'string' || !clientId || clientId.length > 64) throw new CollabError(400, 'clientId is required.');
+    if (![version, index, length].every((n) => Number.isInteger(n) && n >= 0)) throw new CollabError(400, 'Invalid cursor.');
+    // Only tabs with an open stream may show a cursor, so it is always cleaned up on disconnect.
+    const connected = [...(this.subscribers.get(doc.id) ?? [])].some((r) => r.locals.clientId === clientId && r.locals.userId === user.id);
+    if (!connected) return;
+    const missing = this.#since(doc, version);
+    if (missing === null) return; // too stale to place; the client will send a fresh one
+    let end = index + length;
+    for (const e of missing) {
+      const d = new Delta(e.ops);
+      index = d.transformPosition(index);
+      end = d.transformPosition(end);
+    }
+    const max = Math.max(0, new Delta(doc.content ? doc.content.ops : []).length() - 1);
+    index = Math.min(index, max);
+    const cursor = { clientId, user, index, length: Math.max(0, Math.min(end, max) - index) };
+    let map = this.cursors.get(doc.id);
+    if (!map) this.cursors.set(doc.id, (map = new Map()));
+    map.set(clientId, cursor);
+    this.#broadcast(doc.id, 'cursor', cursor);
   }
 
   /** Entries after `version`, or null if history no longer covers that gap. */
@@ -94,6 +125,7 @@ class CollabHub {
   /** Called when content is replaced wholesale (e.g. import), invalidating op history. */
   reset(docId) {
     this.logs.delete(docId);
+    this.cursors.delete(docId);
     this.#broadcast(docId, 'resync', {});
   }
 
@@ -115,13 +147,23 @@ class CollabHub {
     let set = this.subscribers.get(doc.id);
     if (!set) this.subscribers.set(doc.id, (set = new Set()));
     res.locals.userId = req.user.id;
+    res.locals.clientId = typeof req.query.clientId === 'string' ? req.query.clientId.slice(0, 64) : null;
     set.add(res);
+    for (const c of this.cursors.get(doc.id)?.values() ?? []) this.#send(res, 'cursor', c);
     this.#broadcastPresence(doc.id);
     req.on('close', () => {
       set.delete(res);
       if (!set.size) this.subscribers.delete(doc.id);
+      this.#dropCursor(doc.id, res.locals.clientId);
       this.#broadcastPresence(doc.id);
     });
+  }
+
+  #dropCursor(docId, clientId) {
+    const map = this.cursors.get(docId);
+    if (!clientId || !map || !map.delete(clientId)) return;
+    if (!map.size) this.cursors.delete(docId);
+    this.#broadcast(docId, 'cursor-leave', { clientId });
   }
 
   /** Who has the document open right now (one entry per user, across tabs). */
@@ -201,6 +243,7 @@ class CollabHub {
     }
     this.subscribers.delete(docId);
     this.logs.delete(docId);
+    this.cursors.delete(docId);
   }
 
   /** Close one user's streams, e.g. after their access changes. */
@@ -212,6 +255,7 @@ class CollabHub {
       this.#send(res, event, {});
       res.end();
       set.delete(res);
+      this.#dropCursor(docId, res.locals.clientId);
     }
     this.#broadcastPresence(docId);
   }

@@ -23,6 +23,7 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 5. **Real-time co-editing with central-server operational transformation (OT).** This is the same model Google Docs uses. Each document has a version number and an in-memory log of recent changes.
    - A client sends its change with the version it was based on. The server transforms the change past everything that landed since (`quill-delta`'s `transform`), applies it, assigns the next version, and pushes it to all open editors over **Server-Sent Events**.
    - Each client ([public/ot-client.js](public/ot-client.js)) keeps one in-flight change (`pending`) and edits typed since (`buffer`). Incoming remote changes are transformed against both before they're applied to the editor, so your cursor and unsent typing are preserved.
+   - **Live cursors:** a tab reports its selection only when it has no unacknowledged edits, so the position is in server coordinates. The server shifts it through any changes since the reported version, stores it per tab, and shifts stored cursors on every later change. Receivers shift it once more past their own unsent edits, then draw a colored caret, name label, and selection highlight. Cursors are removed when the tab's stream closes, and only tabs with an open stream can post one.
    - Acknowledgements arrive through the same ordered event stream rather than the POST response. That removes the classic race where a response overtakes an earlier remote change.
    - **Why OT over a CRDT (Yjs):** Quill Deltas already ship with `transform`, so OT needed no new dependency, no bundler, and no change to the stored format. A CRDT would add a binary document format and a build step.
    - **Why SSE over WebSockets:** one-way push is all that's needed (edits go up as plain POSTs that reuse the existing auth and access checks). SSE also auto-reconnects with `Last-Event-ID`, which the server uses to replay missed changes.
@@ -39,7 +40,7 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 
 | Cut | Why |
 |-----|-----|
-| Live remote cursors / selections | Nice to have; presence avatars cover "who's here". |
+| Comment threads and suggestion mode | Valuable, but a separate feature area. |
 | Real auth (passwords, OAuth) | The brief allows mocking it. Seeded users make the reviewer flow faster. |
 | Sharing with arbitrary emails / invites | Sharing is limited to existing (seeded) users. |
 | Comments, version history, export | Optional stretch items, not core. |
@@ -58,5 +59,5 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 1. Move `Store` to Postgres (Neon or Supabase free tier): `users`, `documents(content jsonb, version)`, `shares(doc_id, user_id, role)`. Same interface, durable on the free host.
 2. Version history: snapshot the Delta on each save (throttled), plus a restore UI.
 3. Export to Markdown/PDF and "import into the current document".
-4. Live remote cursors (broadcast selection ranges over the same event stream).
+4. Comments anchored to text ranges, reusing the cursor-shifting logic so anchors follow edits.
 5. Browser end-to-end test (Playwright) for the editor UI.

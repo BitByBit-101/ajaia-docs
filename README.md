@@ -23,6 +23,7 @@ Click a user on the sign-in screen. Use **Switch user** (top right) to change ac
 - **Persistence:** documents (stored as Quill Delta JSON) and shares are written to a JSON file and survive a refresh or server restart.
 - **Real-time co-editing:** several people can type in the same document at the same moment, even in the same paragraph, and every keystroke appears for the others in well under a second. This uses operational transformation (the Google Docs model): the server orders every change and transforms concurrent ones so all editors converge. Changes are pushed over Server-Sent Events. Viewers watch edits arrive live.
 - **Presence:** chips show who else has the document open, whether they're **editing** right now (pulsing) or just viewing. Updates are instant.
+- **Live cursors:** see other people's caret and selection in their color with a name label. Cursors stay attached to the right text as anyone edits.
 - **Live sharing:** when someone shares a doc with you, changes your role, or removes access, you get a notification and your dashboard updates without a refresh.
 - **Resilience:** retried sends are idempotent. A dropped connection reconnects and replays missed changes. If a client falls too far behind, it reloads the latest version instead of corrupting the document.
 - **Sample files** for import demos live in `samples/` (`.docx`, `.md`, `.txt`, and an unsupported `.pdf`).
@@ -86,8 +87,9 @@ test/
 | GET/PUT | `/api/documents/:id/shares` `{email, role}` | owner |
 | DELETE | `/api/documents/:id/shares/:userId` | owner |
 | GET | `/api/documents/:id/presence` (who has the doc open, and who is editing) | owner / editor / viewer |
+| POST | `/api/documents/:id/cursor` `{clientId, version, index, length}` (your caret or selection) | owner / editor / viewer |
 | GET | `/api/events` (per-user Server-Sent Events: shared with you, access changed or removed, renamed, deleted) | signed in |
 | POST | `/api/documents/:id/ops` `{baseVersion, ops, clientId, seq}` (one change, as a Quill Delta) | owner / editor |
-| GET | `/api/documents/:id/events?since=N` (Server-Sent Events: `op`, `title`, `resync`, `reload`, `gone`) | owner / editor / viewer |
+| GET | `/api/documents/:id/events?since=N&clientId=X` (Server-Sent Events: `op`, `presence`, `cursor`, `cursor-leave`, `title`, `resync`, `reload`, `gone`) | owner / editor / viewer |
 
 Users without access get `404` (not `403`) so document IDs can't be probed.
