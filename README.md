@@ -16,13 +16,14 @@ Click a user on the sign-in screen. Use **Switch user** (top right) to change ac
 
 ## Features
 
-- **Documents:** create, rename (click the title), delete (owner only), and autosave about 0.8 s after you stop typing, with a save-status indicator.
+- **Documents:** create, rename (click the title), delete (owner only), and continuous autosave with a save-status indicator.
 - **Rich text (Quill 2):** H1–H3, bold, italic, underline, strikethrough, numbered and bulleted lists, blockquote, links.
 - **File import:** `.txt`, `.md`, and `.docx` files up to 2 MB become a new editable document. Formatting is preserved: headings, bold and italic, lists. Other file types are rejected with a clear message.
 - **Sharing:** the owner grants access by user with **Can edit** or **Can view**, changes roles, and revokes access. The dashboard separates **My documents** from **Shared with me** and shows role badges. Viewers get a read-only editor.
 - **Persistence:** documents (stored as Quill Delta JSON) and shares are written to a JSON file and survive a refresh or server restart.
-- **Conflict safety:** saves carry a `baseVersion`. A stale save returns `409`, and the UI asks you to reload instead of silently overwriting someone else's changes.
-- **Live collaboration indicators (stretch):** avatars show who else has the document open. If another user saves while you have no unsaved edits, their version loads in place within about 4 seconds, no refresh needed. This uses lightweight polling, not WebSockets.
+- **Real-time co-editing:** several people can type in the same document at the same moment, even in the same paragraph, and every keystroke appears for the others in well under a second. This uses operational transformation (the Google Docs model): the server orders every change and transforms concurrent ones so all editors converge. Changes are pushed over Server-Sent Events. Viewers watch edits arrive live.
+- **Presence:** avatars show who else has the document open.
+- **Resilience:** retried sends are idempotent. A dropped connection reconnects and replays missed changes. If a client falls too far behind, it reloads the latest version instead of corrupting the document.
 - **Sample files** for import demos live in `samples/` (`.docx`, `.md`, `.txt`, and an unsupported `.pdf`).
 
 ## Run locally
@@ -61,10 +62,13 @@ src/
   store.js      JSON-file persistence, seed data, role resolution
   auth.js       HMAC-signed session cookie helpers
   importers.js  .txt/.md/.docx -> sanitized HTML
+  collab.js     real-time hub: OT transform/ordering, op log, SSE fan-out
 public/
   index.html, app.js, styles.css   vanilla JS SPA (no build step) + Quill
+  ot-client.js  OT client state machine (shared with Node tests)
 test/
   api.test.js   end-to-end API tests against a real server instance
+  ot-fuzz.test.js  200 randomized 3-client concurrent-editing convergence scenarios
 ```
 
 ## API summary
@@ -81,5 +85,7 @@ test/
 | GET/PUT | `/api/documents/:id/shares` `{email, role}` | owner |
 | DELETE | `/api/documents/:id/shares/:userId` | owner |
 | POST/DELETE | `/api/documents/:id/presence` (heartbeat → `{active, version}`) | owner / editor / viewer |
+| POST | `/api/documents/:id/ops` `{baseVersion, ops, clientId, seq}` (one change, as a Quill Delta) | owner / editor |
+| GET | `/api/documents/:id/events?since=N` (Server-Sent Events: `op`, `title`, `resync`, `reload`, `gone`) | owner / editor / viewer |
 
 Users without access get `404` (not `403`) so document IDs can't be probed.

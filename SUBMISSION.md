@@ -28,15 +28,15 @@
 4. In that document, click **Share** and give Bob **Can view**.
 5. Click **Switch user** and sign in as **Bob**. The document appears under "Shared with me" as view-only, and the editor is read-only.
 6. As Bob, open the Welcome doc (Can edit). Bob can edit it but has no Share or Delete buttons.
-7. Optional live demo: open the same doc as Alice in a normal window and as Bob in an incognito window. Each sees the other's avatar, and a save by one appears for the other within about 4 seconds.
+7. **Real-time co-editing:** open the same doc as Alice in a normal window and as Bob in an incognito window, side by side. Type in both at once, even in the same sentence. Each person's text appears in the other window instantly and nothing is lost.
 
 ## Status
 
-**Working end to end:** create, rename, rich-text edit, autosave and reopen, delete; `.txt`/`.md`/`.docx` import; owner/editor/viewer sharing with grant, change, and revoke; persistence; conflict detection (`409`); presence avatars and live pickup of other users' saves; validation and error messages; tests.
+**Working end to end:** create, rename, rich-text edit, autosave and reopen, delete; `.txt`/`.md`/`.docx` import; owner/editor/viewer sharing with grant, change, and revoke; persistence; **real-time simultaneous co-editing** (operational transformation + Server-Sent Events) with presence avatars; validation and error messages; tests, including a 200-scenario convergence fuzz test.
 
 **Incomplete or limited:**
-- No character-level simultaneous co-editing. If two people type at the same moment, the second save is blocked with a reload prompt instead of being merged.
+- No live remote cursors (you see who's in the doc and their edits, but not where their cursor is).
 - Mocked auth: seeded users only.
 - On the free host, data resets on redeploy or idle spin-down (works locally indefinitely).
 
-**Next 2–4 hours:** Postgres-backed `Store`, version history, Markdown/PDF export, WebSockets + Yjs for true co-editing, and a Playwright UI test. Details are in `ARCHITECTURE.md`.
+**Next 2–4 hours:** Postgres-backed `Store`, version history, Markdown/PDF export, live remote cursors, and a Playwright UI test. Details are in `ARCHITECTURE.md`.

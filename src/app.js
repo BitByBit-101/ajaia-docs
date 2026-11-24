@@ -7,6 +7,7 @@ const multer = require('multer');
 const { ROLES } = require('./store');
 const { COOKIE_NAME, makeToken, verifyToken, parseCookies } = require('./auth');
 const { fileToHtml, ImportError, SUPPORTED_EXTENSIONS, MAX_UPLOAD_BYTES } = require('./importers');
+const { CollabHub, CollabError } = require('./collab');
 
 const MAX_TITLE = 200;
 const MAX_OPS = 20000;
@@ -45,6 +46,7 @@ function validateDelta(content) {
 
 function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), secureCookies = false } = {}) {
   const app = express();
+  const hub = new CollabHub(store);
   app.disable('x-powered-by');
   app.use(express.json({ limit: '2mb' }));
 
@@ -173,10 +175,24 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     }
     if (!Object.keys(patch).length) throw new HttpError(400, 'Nothing to update.');
     const doc = store.updateDocument(req.doc.id, patch);
+    if (patch.content) hub.reset(doc.id);
+    if (patch.title) hub.broadcastTitle(doc.id, doc.title);
     res.json({ document: doc, role: req.role });
   });
 
+  // ---- Real-time collaboration (OT over HTTP + Server-Sent Events) ----
+  app.post('/api/documents/:id/ops', requireUser, loadDoc('editor'), (req, res) => {
+    const { baseVersion, ops, clientId, seq } = req.body || {};
+    const entry = hub.submit(req.doc, { baseVersion, ops, clientId, seq });
+    res.json({ version: entry.version });
+  });
+
+  app.get('/api/documents/:id/events', requireUser, loadDoc('viewer'), (req, res) => {
+    hub.subscribe(req.doc, req, res);
+  });
+
   app.delete('/api/documents/:id', requireUser, loadDoc('owner'), (req, res) => {
+    hub.closeAll(req.doc.id);
     store.deleteDocument(req.doc.id);
     res.status(204).end();
   });
@@ -193,11 +209,14 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     if (!target) throw new HttpError(404, 'No user with that email.');
     if (target.id === req.doc.ownerId) throw new HttpError(400, 'The owner already has full access.');
     store.upsertShare(req.doc.id, target.id, role);
+    // Open editors reconnect so the new role takes effect immediately.
+    hub.closeUser(req.doc.id, target.id, 'reload');
     res.json({ shares: shareView(req.doc.id) });
   });
 
   app.delete('/api/documents/:id/shares/:userId', requireUser, loadDoc('owner'), (req, res) => {
     if (!store.removeShare(req.doc.id, req.params.userId)) throw new HttpError(404, 'Share not found.');
+    hub.closeUser(req.doc.id, req.params.userId, 'gone');
     res.json({ shares: shareView(req.doc.id) });
   });
 
@@ -234,6 +253,7 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...err.extra });
+    if (err instanceof CollabError) return res.status(err.status).json({ error: err.message });
     if (err instanceof ImportError) return res.status(400).json({ error: err.message });
     if (err instanceof multer.MulterError) {
       const msg = err.code === 'LIMIT_FILE_SIZE' ? `File too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB).` : err.message;

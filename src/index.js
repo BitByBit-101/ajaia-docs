@@ -18,3 +18,10 @@ const app = createApp({ store, secret: process.env.SESSION_SECRET, secureCookies
 app.listen(port, () => {
   console.log(`Ajaia Docs running at http://localhost:${port} (data: ${dataFile})`);
 });
+
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    store.flush();
+    process.exit(0);
+  });
+}

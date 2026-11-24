@@ -70,6 +70,10 @@ class Store {
 
   #persist() {
     if (!this.file) return;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     // Write-then-rename so a crash mid-write never leaves a truncated DB.
     const tmp = `${this.file}.tmp`;
@@ -130,18 +134,37 @@ class Store {
     return this.documents.find((d) => d.id === id) || null;
   }
 
-  updateDocument(id, patch) {
+  updateDocument(id, patch, { deferPersist = false } = {}) {
     const doc = this.getDocument(id);
     if (!doc) return null;
     if (patch.title !== undefined) doc.title = patch.title;
+    // version tracks content only; it is the OT sequence number.
     if (patch.content !== undefined) {
       doc.content = patch.content;
       doc.importedHtml = null;
+      doc.version += 1;
     }
-    doc.version += 1;
     doc.updatedAt = new Date().toISOString();
-    this.#persist();
+    if (deferPersist) this.#schedulePersist();
+    else this.#persist();
     return doc;
+  }
+
+  // Live typing produces many small changes; batch disk writes.
+  #schedulePersist() {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.#persist();
+    }, 500);
+    this.persistTimer.unref?.();
+  }
+
+  flush() {
+    if (!this.persistTimer) return;
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
+    this.#persist();
   }
 
   deleteDocument(id) {

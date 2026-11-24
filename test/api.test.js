@@ -180,6 +180,81 @@ test('presence shows other active collaborators and the latest version', async (
   assert.deepEqual((await alice('POST', `/api/documents/${id}/presence`)).body.active, []);
 });
 
+test('real-time: concurrent edits from two users are transformed and both survive', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const bob = await loginAs('bob@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', { content: { ops: [{ insert: 'Hello world\n' }] } });
+  const id = body.document.id;
+  const v = body.document.version;
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'bob@ajaia.dev', role: 'editor' });
+
+  // Both edit the same base version at the "same instant".
+  const a = await alice('POST', `/api/documents/${id}/ops`, {
+    baseVersion: v, clientId: 'tab-a', seq: 1, ops: [{ retain: 5 }, { insert: ' brave' }],
+  });
+  const b = await bob('POST', `/api/documents/${id}/ops`, {
+    baseVersion: v, clientId: 'tab-b', seq: 1, ops: [{ retain: 11 }, { insert: '!', attributes: { bold: true } }],
+  });
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  assert.equal(b.body.version, v + 2);
+
+  const doc = (await alice('GET', `/api/documents/${id}`)).body.document;
+  const text = doc.content.ops.map((o) => o.insert).join('');
+  assert.equal(text, 'Hello brave world!\n');
+  assert.ok(doc.content.ops.some((o) => o.insert === '!' && o.attributes.bold));
+
+  // Retrying the same (clientId, seq) is idempotent.
+  const retry = await bob('POST', `/api/documents/${id}/ops`, {
+    baseVersion: v, clientId: 'tab-b', seq: 1, ops: [{ retain: 11 }, { insert: '!' }],
+  });
+  assert.equal(retry.body.version, v + 2);
+  assert.equal((await alice('GET', `/api/documents/${id}`)).body.document.version, v + 2);
+});
+
+test('real-time: ops are validated and viewers cannot submit', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const carol = await loginAs('carol@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', {});
+  const id = body.document.id;
+  const v = body.document.version;
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'carol@ajaia.dev', role: 'viewer' });
+
+  const op = (ops, extra = {}) => ({ baseVersion: v, clientId: 'c', seq: 1, ops, ...extra });
+  assert.equal((await carol('POST', `/api/documents/${id}/ops`, op([{ insert: 'x' }]))).status, 403);
+  assert.equal((await alice('POST', `/api/documents/${id}/ops`, op([{ retain: -1 }]))).status, 400);
+  assert.equal((await alice('POST', `/api/documents/${id}/ops`, op([{ delete: 1 }]))).status, 400); // would remove final newline
+  assert.equal((await alice('POST', `/api/documents/${id}/ops`, op([{ insert: 'x' }], { baseVersion: v + 5 }))).status, 409);
+});
+
+test('real-time: changes are pushed to other editors over Server-Sent Events', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', {});
+  const id = body.document.id;
+  const v = body.document.version;
+
+  const login = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'alice@ajaia.dev' }),
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const ctrl = new AbortController();
+  const stream = await fetch(`${base}/api/documents/${id}/events?since=${v}`, { headers: { cookie }, signal: ctrl.signal });
+  assert.equal(stream.headers.get('content-type'), 'text/event-stream');
+  const reader = stream.body.getReader();
+
+  await alice('POST', `/api/documents/${id}/ops`, { baseVersion: v, clientId: 'other-tab', seq: 1, ops: [{ insert: 'Hi' }] });
+
+  let received = '';
+  while (!received.includes('event: op')) received += new TextDecoder().decode((await reader.read()).value);
+  ctrl.abort();
+  const data = JSON.parse(received.split('event: op\ndata: ')[1].split('\n')[0]);
+  assert.equal(data.version, v + 1);
+  assert.deepEqual(data.ops, [{ insert: 'Hi' }]);
+  assert.equal(data.clientId, 'other-tab');
+});
+
 test('store persists documents and shares to disk across restarts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ajaia-docs-'));
   const file = path.join(dir, 'db.json');
