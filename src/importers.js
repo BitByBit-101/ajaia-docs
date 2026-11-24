@@ -57,7 +57,7 @@ async function fileToHtml(originalName, buffer) {
       throw new ImportError('File is not a valid .docx document.');
     }
     try {
-      ({ value: html } = await mammoth.convertToHtml({ buffer }));
+      ({ value: html } = await mammoth.convertToHtml({ buffer }, { styleMap: ['u => u'] }));
     } catch {
       throw new ImportError('Could not read .docx file.');
     }

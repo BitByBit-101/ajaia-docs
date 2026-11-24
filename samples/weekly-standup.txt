@@ -1,0 +1,14 @@
+Weekly Standup Notes - Nov 24
+
+Attendees: Alice, Bob, Carol
+
+Done
+Finished the sharing panel with editor and viewer roles.
+Added file import for txt, md and docx.
+
+Next
+Add version history.
+Move storage to Postgres.
+
+Blockers
+None.
