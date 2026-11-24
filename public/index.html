@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ajaia Docs</title>
+  <link rel="stylesheet" href="/vendor/quill/quill.snow.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand">Ajaia <span>Docs</span></a>
+    <div id="userbox" class="userbox" hidden>
+      <span id="userName"></span>
+      <button id="logoutBtn" class="btn btn-ghost">Switch user</button>
+    </div>
+  </header>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- Login -->
+  <main id="loginView" class="view" hidden>
+    <section class="card login-card">
+      <h1>Sign in</h1>
+      <p class="muted">Demo build: pick a seeded account. No password needed.</p>
+      <div id="demoUsers" class="demo-users"></div>
+    </section>
+  </main>
+
+  <!-- Dashboard -->
+  <main id="listView" class="view" hidden>
+    <div class="list-actions">
+      <button id="newDocBtn" class="btn btn-primary">+ New document</button>
+      <label class="btn btn-secondary file-btn">
+        Import file
+        <input id="importInput" type="file" accept=".txt,.md,.markdown,.docx" />
+      </label>
+      <span class="muted small">Import supports .txt, .md and .docx (max 2&nbsp;MB) and creates a new editable document.</span>
+    </div>
+
+    <section>
+      <h2>My documents</h2>
+      <ul id="ownedList" class="doc-list"></ul>
+    </section>
+    <section>
+      <h2>Shared with me</h2>
+      <ul id="sharedList" class="doc-list"></ul>
+    </section>
+  </main>
+
+  <!-- Editor -->
+  <main id="editorView" class="view editor-view" hidden>
+    <div class="editor-head">
+      <a href="#/" class="btn btn-ghost">&larr; All documents</a>
+      <input id="titleInput" class="title-input" maxlength="200" aria-label="Document title" />
+      <span id="roleBadge" class="badge"></span>
+      <span id="saveStatus" class="save-status muted small"></span>
+      <div class="editor-actions">
+        <button id="shareBtn" class="btn btn-secondary" hidden>Share</button>
+        <button id="deleteBtn" class="btn btn-danger-ghost" hidden>Delete</button>
+      </div>
+    </div>
+    <div id="docMeta" class="muted small doc-meta"></div>
+    <div id="banner" class="banner" hidden></div>
+    <div class="paper">
+      <div id="editor"></div>
+    </div>
+  </main>
+
+  <!-- Share dialog -->
+  <dialog id="shareDialog" class="dialog">
+    <form method="dialog" class="dialog-head">
+      <h2>Share document</h2>
+      <button class="btn btn-ghost" aria-label="Close">&times;</button>
+    </form>
+    <form id="shareForm" class="share-form">
+      <select id="shareUser" required aria-label="User"></select>
+      <select id="shareRole" aria-label="Role">
+        <option value="editor">Can edit</option>
+        <option value="viewer">Can view</option>
+      </select>
+      <button class="btn btn-primary" type="submit">Share</button>
+    </form>
+    <p id="shareError" class="error small" hidden></p>
+    <h3 class="small muted">People with access</h3>
+    <ul id="shareList" class="share-list"></ul>
+  </dialog>
+
+  <script src="/vendor/quill/quill.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

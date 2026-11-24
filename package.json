@@ -1,0 +1,23 @@
+{
+  "name": "ajaia-docs",
+  "version": "1.0.0",
+  "description": "Lightweight collaborative document editor (Ajaia AI-Native Full Stack assignment)",
+  "main": "src/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mammoth": "^1.9.0",
+    "marked": "^15.0.7",
+    "multer": "^2.0.2",
+    "quill": "2.0.3",
+    "sanitize-html": "^2.14.0"
+  }
+}
