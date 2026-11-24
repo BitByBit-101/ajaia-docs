@@ -22,7 +22,8 @@ Click a user on the sign-in screen. Use **Switch user** (top right) to change ac
 - **Sharing:** the owner grants access by user with **Can edit** or **Can view**, changes roles, and revokes access. The dashboard separates **My documents** from **Shared with me** and shows role badges. Viewers get a read-only editor.
 - **Persistence:** documents (stored as Quill Delta JSON) and shares are written to a JSON file and survive a refresh or server restart.
 - **Real-time co-editing:** several people can type in the same document at the same moment, even in the same paragraph, and every keystroke appears for the others in well under a second. This uses operational transformation (the Google Docs model): the server orders every change and transforms concurrent ones so all editors converge. Changes are pushed over Server-Sent Events. Viewers watch edits arrive live.
-- **Presence:** avatars show who else has the document open.
+- **Presence:** chips show who else has the document open, whether they're **editing** right now (pulsing) or just viewing. Updates are instant.
+- **Live sharing:** when someone shares a doc with you, changes your role, or removes access, you get a notification and your dashboard updates without a refresh.
 - **Resilience:** retried sends are idempotent. A dropped connection reconnects and replays missed changes. If a client falls too far behind, it reloads the latest version instead of corrupting the document.
 - **Sample files** for import demos live in `samples/` (`.docx`, `.md`, `.txt`, and an unsupported `.pdf`).
 
@@ -84,7 +85,8 @@ test/
 | DELETE | `/api/documents/:id` | owner |
 | GET/PUT | `/api/documents/:id/shares` `{email, role}` | owner |
 | DELETE | `/api/documents/:id/shares/:userId` | owner |
-| POST/DELETE | `/api/documents/:id/presence` (heartbeat → `{active, version}`) | owner / editor / viewer |
+| GET | `/api/documents/:id/presence` (who has the doc open, and who is editing) | owner / editor / viewer |
+| GET | `/api/events` (per-user Server-Sent Events: shared with you, access changed or removed, renamed, deleted) | signed in |
 | POST | `/api/documents/:id/ops` `{baseVersion, ops, clientId, seq}` (one change, as a Quill Delta) | owner / editor |
 | GET | `/api/documents/:id/events?since=N` (Server-Sent Events: `op`, `title`, `resync`, `reload`, `gone`) | owner / editor / viewer |
 

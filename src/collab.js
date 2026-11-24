@@ -44,9 +44,11 @@ class CollabHub {
     this.store = store;
     this.logs = new Map(); // docId -> [{ version, ops, clientId }]
     this.subscribers = new Map(); // docId -> Set<res>
+    this.editing = new Map(); // `${docId}:${userId}` -> timeout clearing the "editing" flag
+    this.userStreams = new Map(); // userId -> Set<res>
   }
 
-  submit(doc, { baseVersion, ops, clientId, seq }) {
+  submit(doc, { baseVersion, ops, clientId, seq, userId }) {
     if (!Number.isInteger(baseVersion)) throw new CollabError(400, 'baseVersion is required.');
     if (typeof clientId !== 'string' || !clientId || clientId.length > 64) throw new CollabError(400, 'clientId is required.');
     if (!Number.isInteger(seq)) throw new CollabError(400, 'seq is required.');
@@ -76,6 +78,7 @@ class CollabHub {
     if (log.length > MAX_LOG) log.splice(0, log.length - MAX_LOG);
     this.logs.set(doc.id, log);
     this.#broadcast(doc.id, 'op', entry, entry.version);
+    if (userId) this.#markEditing(doc.id, userId);
     return entry;
   }
 
@@ -99,13 +102,7 @@ class CollabHub {
   }
 
   subscribe(doc, req, res) {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.write('retry: 2000\n\n');
+    this.#openStream(req, res);
 
     // On auto-reconnect the browser sends Last-Event-ID, which is newer than ?since.
     const since = Number(req.headers['last-event-id'] ?? req.query.since);
@@ -119,13 +116,79 @@ class CollabHub {
     if (!set) this.subscribers.set(doc.id, (set = new Set()));
     res.locals.userId = req.user.id;
     set.add(res);
-    // Comment pings keep proxies from closing idle streams.
-    const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+    this.#broadcastPresence(doc.id);
     req.on('close', () => {
-      clearInterval(ping);
       set.delete(res);
       if (!set.size) this.subscribers.delete(doc.id);
+      this.#broadcastPresence(doc.id);
     });
+  }
+
+  /** Who has the document open right now (one entry per user, across tabs). */
+  presence(docId) {
+    const doc = this.store.getDocument(docId);
+    const set = this.subscribers.get(docId);
+    if (!doc || !set) return [];
+    const seen = new Map();
+    for (const res of set) {
+      const userId = res.locals.userId;
+      if (seen.has(userId)) continue;
+      const user = this.store.getUser(userId);
+      const role = this.store.getRole(doc, userId);
+      if (user && role) seen.set(userId, { user, role, editing: this.editing.has(`${docId}:${userId}`) });
+    }
+    return [...seen.values()];
+  }
+
+  // "Editing" = made a change in the last 2.5 s; broadcast only when the flag flips.
+  #markEditing(docId, userId) {
+    const key = `${docId}:${userId}`;
+    const wasEditing = this.editing.has(key);
+    clearTimeout(this.editing.get(key));
+    const timer = setTimeout(() => {
+      this.editing.delete(key);
+      this.#broadcastPresence(docId);
+    }, 2500);
+    timer.unref?.();
+    this.editing.set(key, timer);
+    if (!wasEditing) this.#broadcastPresence(docId);
+  }
+
+  #broadcastPresence(docId) {
+    this.#broadcast(docId, 'presence', { users: this.presence(docId) });
+  }
+
+  /** Per-user stream for dashboard-level updates (shared with you, access removed, renamed). */
+  subscribeUser(req, res) {
+    this.#openStream(req, res);
+    const userId = req.user.id;
+    let set = this.userStreams.get(userId);
+    if (!set) this.userStreams.set(userId, (set = new Set()));
+    set.add(res);
+    req.on('close', () => {
+      set.delete(res);
+      if (!set.size) this.userStreams.delete(userId);
+    });
+  }
+
+  notifyUsers(userIds, data = {}) {
+    for (const userId of new Set(userIds)) {
+      const set = this.userStreams.get(userId);
+      if (set) for (const res of set) this.#send(res, 'docs', data);
+    }
+  }
+
+  #openStream(req, res) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('retry: 2000\n\n');
+    // Comment pings keep proxies from closing idle streams.
+    const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+    req.on('close', () => clearInterval(ping));
   }
 
   /** Close all streams for a document (e.g. deleted). */
@@ -150,6 +213,7 @@ class CollabHub {
       res.end();
       set.delete(res);
     }
+    this.#broadcastPresence(docId);
   }
 
   #send(res, event, data, id) {

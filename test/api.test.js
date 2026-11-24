@@ -29,7 +29,7 @@ async function loginAs(email) {
   });
   assert.equal(res.status, 200);
   const cookie = res.headers.get('set-cookie').split(';')[0];
-  return async (method, url, body) => {
+  const call = async (method, url, body) => {
     const init = { method, headers: { cookie } };
     if (body instanceof FormData) init.body = body;
     else if (body !== undefined) {
@@ -38,6 +38,36 @@ async function loginAs(email) {
     }
     const r = await fetch(`${base}${url}`, init);
     return { status: r.status, body: r.status === 204 ? null : await r.json() };
+  };
+  call.cookie = cookie;
+  return call;
+}
+
+/** Minimal SSE reader: `next(name)` resolves with the data of the next event with that name. */
+async function openStream(cookie, url) {
+  const ctrl = new AbortController();
+  const res = await fetch(`${base}${url}`, { headers: { cookie }, signal: ctrl.signal });
+  assert.equal(res.status, 200);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  return {
+    async next(name) {
+      for (;;) {
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const event = (block.match(/^event: (.*)$/m) || [])[1];
+          const data = (block.match(/^data: (.*)$/m) || [])[1];
+          if (event === name) return JSON.parse(data);
+        }
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`stream ended waiting for ${name}`);
+        buf += decoder.decode(value, { stream: true });
+      }
+    },
+    close: () => ctrl.abort(),
   };
 }
 
@@ -157,27 +187,52 @@ test('imports markdown into a new sanitized document and rejects unsupported fil
   assert.equal((await alice('POST', '/api/documents/import', fakeDocx)).status, 400);
 });
 
-test('presence shows other active collaborators and the latest version', async () => {
+test('presence is pushed instantly: who joins, who is editing, who leaves', async () => {
   const alice = await loginAs('alice@ajaia.dev');
   const bob = await loginAs('bob@ajaia.dev');
   const carol = await loginAs('carol@ajaia.dev');
   const { body } = await alice('POST', '/api/documents', { title: 'Live doc' });
   const id = body.document.id;
+  const v = body.document.version;
   await alice('PUT', `/api/documents/${id}/shares`, { email: 'bob@ajaia.dev', role: 'editor' });
 
-  assert.deepEqual((await alice('POST', `/api/documents/${id}/presence`)).body.active, []);
-  await bob('POST', `/api/documents/${id}/presence`);
-  await bob('PATCH', `/api/documents/${id}`, { content: delta('from bob') });
+  const aliceStream = await openStream(alice.cookie, `/api/documents/${id}/events?since=${v}`);
+  const names = (p) => p.users.map((u) => `${u.user.id}:${u.editing ? 'editing' : 'idle'}`).sort();
+  assert.deepEqual(names(await aliceStream.next('presence')), ['u_alice:idle']);
 
-  const seen = await alice('POST', `/api/documents/${id}/presence`);
-  assert.deepEqual(seen.body.active.map((a) => [a.user.id, a.role]), [['u_bob', 'editor']]);
-  assert.equal(seen.body.version, body.document.version + 1);
+  const bobStream = await openStream(bob.cookie, `/api/documents/${id}/events?since=${v}`);
+  assert.deepEqual(names(await aliceStream.next('presence')), ['u_alice:idle', 'u_bob:idle']);
+
+  await bob('POST', `/api/documents/${id}/ops`, { baseVersion: v, clientId: 'b', seq: 1, ops: [{ insert: 'x' }] });
+  assert.deepEqual(names(await aliceStream.next('presence')), ['u_alice:idle', 'u_bob:editing']);
 
   // Users without access can't see who is in a document.
-  assert.equal((await carol('POST', `/api/documents/${id}/presence`)).status, 404);
+  assert.equal((await carol('GET', `/api/documents/${id}/presence`)).status, 404);
 
-  await bob('DELETE', `/api/documents/${id}/presence`);
-  assert.deepEqual((await alice('POST', `/api/documents/${id}/presence`)).body.active, []);
+  bobStream.close();
+  let p;
+  do p = await aliceStream.next('presence');
+  while (p.users.some((u) => u.user.id === 'u_bob'));
+  assert.deepEqual(names(p), ['u_alice:idle']);
+  aliceStream.close();
+});
+
+test('sharing is pushed to the recipient immediately', async () => {
+  const alice = await loginAs('alice@ajaia.dev');
+  const carol = await loginAs('carol@ajaia.dev');
+  const { body } = await alice('POST', '/api/documents', { title: 'Budget' });
+  const id = body.document.id;
+
+  const carolInbox = await openStream(carol.cookie, '/api/events');
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'carol@ajaia.dev', role: 'viewer' });
+  assert.match((await carolInbox.next('docs')).message, /Alice Chen shared "Budget" with you \(can view\)/);
+
+  await alice('PUT', `/api/documents/${id}/shares`, { email: 'carol@ajaia.dev', role: 'editor' });
+  assert.match((await carolInbox.next('docs')).message, /changed: you can edit/);
+
+  await alice('DELETE', `/api/documents/${id}/shares/u_carol`);
+  assert.match((await carolInbox.next('docs')).message, /was removed/);
+  carolInbox.close();
 });
 
 test('real-time: concurrent edits from two users are transformed and both survive', async () => {

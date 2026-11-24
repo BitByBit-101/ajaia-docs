@@ -18,7 +18,8 @@
 - **Fixed a version race.** An early design saved titles and content through separate requests, which could trigger false `409` conflicts. I merged them into one serialized save path.
 - **Fixed the test script.** `node --test test/` fails on Node 22 on Windows. Changed it to `node --test` (auto-discovery).
 - **Fixed a `.docx` import gap.** While generating sample files, I found that mammoth drops underlines by default, and underline is a required format. Added a `u => u` style map.
-- **Picked polling over WebSockets for presence**, and SSE + POST over WebSockets for co-editing. Both reuse the existing auth and access middleware and need no extra dependency.
+- **Chose SSE + POST over WebSockets** for co-editing, presence, and notifications. This reuses the existing auth and access middleware and needs no extra dependency.
+- **Replaced polling presence after user feedback.** The first version polled every 4 s with a 12 s timeout, which felt laggy. Presence is now derived from open event streams and pushed instantly, with a live "editing" state. Navigation no longer waits for unsent edits (they finish in the background), and the editor clears immediately so stale content is never shown while loading.
 - **Chose OT on Quill Deltas over Yjs.** Yjs would have meant a bundler and a new stored format. `quill-delta` already provides `transform`.
 - **Changed where acks come from.** The first draft acknowledged sends from the POST response. That can race with remote changes still in the event stream, so acks now come through the same ordered SSE stream.
 - **Added idempotent retries** (`clientId` + `seq`), so a resend after a lost response can't duplicate text.

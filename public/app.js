@@ -7,14 +7,12 @@ const state = {
   user: null,
   users: [],
   quill: null,
-  // Open document: { id, version, role, owner, title }. `version` is the last server op applied locally.
-  doc: null,
-  ot: null, // OTClient for the open document
-  sendTimer: null,
-  events: null,
-  broken: false,
+  // Live editing session for the open document; see "real-time sync" below.
+  session: null,
+  openSeq: 0,
+  listSeq: 0,
+  userEvents: null,
   clientId: Math.random().toString(36).slice(2) + Date.now().toString(36),
-  presenceTimer: null,
 };
 
 // ---------- helpers ----------
@@ -58,7 +56,7 @@ function toast(msg, isError = false) {
   t.classList.toggle('error', isError);
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), isError ? 5000 : 2500);
+  toastTimer = setTimeout(() => (t.hidden = true), isError ? 5000 : 3500);
 }
 
 function timeAgo(iso) {
@@ -80,6 +78,8 @@ function showView(id) {
 
 async function showLogin() {
   state.user = null;
+  leaveDoc();
+  disconnectUserEvents();
   $('userbox').hidden = true;
   showView('loginView');
   const box = $('demoUsers');
@@ -107,14 +107,33 @@ function setUser(user) {
   state.user = user;
   $('userName').textContent = `${user.name} (${user.email})`;
   $('userbox').hidden = false;
+  connectUserEvents();
 }
 
 $('logoutBtn').addEventListener('click', async () => {
-  await leaveDoc();
+  leaveDoc();
+  disconnectUserEvents();
   await api('/api/logout', { method: 'POST' });
   location.hash = '#/';
   showLogin();
 });
+
+// Dashboard-level pushes: shared with you, access removed, renamed, deleted.
+function connectUserEvents() {
+  disconnectUserEvents();
+  const es = new EventSource('/api/events');
+  state.userEvents = es;
+  es.addEventListener('docs', (e) => {
+    const { message } = JSON.parse(e.data);
+    if (message) toast(message);
+    if (!$('listView').hidden) showList({ quiet: true });
+  });
+}
+
+function disconnectUserEvents() {
+  if (state.userEvents) state.userEvents.close();
+  state.userEvents = null;
+}
 
 // ---------- document list ----------
 
@@ -142,10 +161,15 @@ function renderList(ul, docs, emptyText) {
   }
 }
 
-async function showList() {
+async function showList({ quiet = false } = {}) {
   showView('listView');
+  const seq = ++state.listSeq;
+  if (!quiet) {
+    for (const id of ['ownedList', 'sharedList']) $(id).replaceChildren(el('li', { class: 'empty' }, 'Loading...'));
+  }
   try {
     const { owned, shared } = await api('/api/documents');
+    if (seq !== state.listSeq) return;
     renderList($('ownedList'), owned, 'No documents yet. Create one or import a file.');
     renderList($('sharedList'), shared, 'Nothing has been shared with you yet.');
   } catch (e) {
@@ -217,195 +241,194 @@ function showBanner(text, { danger = false, action } = {}) {
   b.hidden = false;
 }
 
+const backAction = { label: 'Back to documents', onClick: () => (location.hash = '#/') };
+
 function metaText(owner, updatedAt) {
   return `Owner: ${owner.name} · Last saved ${new Date(updatedAt).toLocaleString()}`;
 }
 
 function refreshStatus() {
-  if (state.broken || !state.doc || state.doc.role === 'viewer') return;
-  if (!state.ot.idle) setStatus('Saving...');
+  const s = state.session;
+  if (!s || s.broken || s.doc.role === 'viewer') return;
+  if (!s.ot.idle) setStatus('Saving...');
   else {
     setStatus('All changes saved');
-    $('docMeta').textContent = metaText(state.doc.owner, new Date().toISOString());
+    $('docMeta').textContent = metaText(s.doc.owner, new Date().toISOString());
   }
 }
 
 // ---------- real-time sync (OT client) ----------
+// A session owns one document's OT state and event stream. Leaving a document detaches the
+// session from the UI immediately; it lives on in the background only until unsent edits land.
+
+const isActive = (s) => s === state.session;
 
 function onLocalChange(delta) {
-  if (!state.doc || state.broken) return;
-  state.ot.applyLocal(delta);
+  const s = state.session;
+  if (!s || s.broken || s.doc.role === 'viewer') return;
+  s.ot.applyLocal(delta);
   refreshStatus();
-  scheduleSend(100);
+  scheduleSend(s, 60);
 }
 
-function scheduleSend(ms) {
-  if (!state.sendTimer) state.sendTimer = setTimeout(sendBuffer, ms);
+function scheduleSend(s, ms) {
+  if (!s.sendTimer && !s.closed) s.sendTimer = setTimeout(() => sendBuffer(s), ms);
 }
 
-async function sendBuffer() {
-  state.sendTimer = null;
-  const doc = state.doc;
-  if (!doc || state.broken || !state.ot.takeSend()) return;
-  await postPending(doc);
+async function sendBuffer(s) {
+  s.sendTimer = null;
+  if (s.closed || s.broken || !s.ot.takeSend()) return maybeClose(s);
+  await postPending(s);
 }
 
 // The ack arrives over the event stream (keeps ordering); the POST only reports errors.
-async function postPending(doc) {
-  const ot = state.ot;
+async function postPending(s) {
   try {
-    await api(docUrl(doc.id, '/ops'), { method: 'POST', body: ot.outgoing() });
+    await api(docUrl(s.doc.id, '/ops'), { method: 'POST', body: s.ot.outgoing() });
   } catch (e) {
-    if (state.doc !== doc) return;
+    if (s.closed) return;
     if (e.status === 0 || e.status >= 500) {
       // Same seq on retry, so the server ignores it if the first attempt actually landed.
-      setStatus('Connection lost. Retrying...', true);
-      setTimeout(() => state.ot === ot && ot.pending && postPending(doc), 2000);
-    } else if (e.status === 403) {
-      resync('Your access changed.');
+      if (isActive(s)) setStatus('Connection lost. Retrying...', true);
+      setTimeout(() => !s.closed && s.ot.pending && postPending(s), 2000);
+    } else if (isActive(s)) {
+      resync(e.status === 403 ? 'Your access changed.' : e.message);
     } else {
-      resync(e.message);
+      closeSession(s);
     }
   }
 }
 
-function onServerOp(entry) {
-  if (!state.doc || state.broken) return;
-  const result = state.ot.receive(entry);
-  if (result.type === 'gap') return resync('Fell out of sync.');
-  if (result.type === 'ack' && state.ot.buffer) scheduleSend(0);
-  if (result.type === 'remote') state.quill.updateContents(result.delta, 'api');
-  if (result.type !== 'ignore' && state.ot.idle) refreshStatus();
+function onServerOp(s, entry) {
+  if (s.broken) return;
+  const result = s.ot.receive(entry);
+  if (result.type === 'gap') return isActive(s) ? resync('Fell out of sync.') : closeSession(s);
+  if (result.type === 'ack' && s.ot.buffer) scheduleSend(s, 0);
+  if (result.type === 'remote' && isActive(s)) state.quill.updateContents(result.delta, 'api');
+  if (result.type !== 'ignore' && isActive(s) && s.ot.idle) refreshStatus();
+  maybeClose(s);
 }
 
-function connectEvents(doc) {
-  const es = new EventSource(docUrl(doc.id, `/events?since=${state.ot.version}`));
-  state.events = es;
-  const live = () => state.events === es && state.doc === doc;
-  es.addEventListener('op', (e) => live() && onServerOp(JSON.parse(e.data)));
-  es.addEventListener('title', (e) => {
-    if (!live()) return;
-    const { title } = JSON.parse(e.data);
-    doc.title = title;
-    if (document.activeElement !== $('titleInput')) $('titleInput').value = title;
+function connectEvents(s) {
+  const es = new EventSource(docUrl(s.doc.id, `/events?since=${s.ot.version}`));
+  s.events = es;
+  const on = (name, fn) => es.addEventListener(name, (e) => !s.closed && fn(JSON.parse(e.data)));
+  on('op', (entry) => onServerOp(s, entry));
+  on('presence', ({ users }) => isActive(s) && renderPresence(users));
+  on('title', ({ title }) => {
+    s.doc.title = title;
+    if (isActive(s) && document.activeElement !== $('titleInput')) $('titleInput').value = title;
   });
-  es.addEventListener('resync', () => live() && resync('The document was replaced.'));
-  es.addEventListener('reload', () => live() && resync('Your access changed.'));
-  es.addEventListener('gone', () => {
-    if (!live()) return;
-    disconnect();
-    state.broken = true;
+  on('resync', () => (isActive(s) ? resync('The document was replaced.') : closeSession(s)));
+  on('reload', () => (isActive(s) ? resync('Your access changed.') : closeSession(s)));
+  on('gone', () => {
+    closeSession(s);
+    if (!isActive(s)) return;
+    s.broken = true;
     state.quill.enable(false);
-    stopPresence();
-    showBanner('You no longer have access to this document.', {
-      danger: true,
-      action: { label: 'Back to documents', onClick: () => (location.hash = '#/') },
-    });
+    renderPresence([]);
+    showBanner('You no longer have access to this document.', { danger: true, action: backAction });
   });
-  es.onopen = () => live() && refreshStatus();
+  es.onopen = () => isActive(s) && refreshStatus();
   es.onerror = () => {
-    if (!live()) return;
+    if (s.closed || !isActive(s)) return;
     if (es.readyState === EventSource.CLOSED) resync('Lost connection.');
     else setStatus('Reconnecting...', true);
   };
 }
 
-function disconnect() {
-  if (state.events) state.events.close();
-  state.events = null;
-  clearTimeout(state.sendTimer);
-  state.sendTimer = null;
+function maybeClose(s) {
+  if (s.closing && s.ot.idle) closeSession(s);
+}
+
+function closeSession(s) {
+  if (!s || s.closed) return;
+  s.closed = true;
+  if (s.events) s.events.close();
+  clearTimeout(s.sendTimer);
+}
+
+/** Detach the open document from the UI without waiting; unsent edits finish in the background. */
+function leaveDoc() {
+  const s = state.session;
+  if (!s) return;
+  state.session = null;
+  s.closing = true;
+  if (s.ot.buffer && !s.ot.pending) sendBuffer(s);
+  maybeClose(s);
+  setTimeout(() => closeSession(s), 15000);
 }
 
 function resync(reason) {
-  const doc = state.doc;
-  if (!doc || state.broken) return;
-  const lost = !state.ot.idle;
-  state.broken = true;
-  disconnect();
+  const s = state.session;
+  if (!s || s.broken) return;
+  const lost = !s.ot.idle;
+  s.broken = true;
+  closeSession(s);
+  state.session = null;
   toast(`${reason} Reloaded the latest version${lost ? '; your last few keystrokes may be missing' : ''}.`, !!lost);
-  openDoc(doc.id);
-}
-
-/** Wait (briefly) for unsent edits to reach the server before leaving a document. */
-async function drain(timeoutMs = 2500) {
-  if (state.ot.buffer && !state.ot.pending) await sendBuffer();
-  const start = Date.now();
-  while (!state.ot.idle && !state.broken && Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  openDoc(s.doc.id);
 }
 
 // ---------- presence ----------
 
 const AVATAR_COLORS = ['#2563eb', '#db2777', '#059669', '#d97706', '#7c3aed'];
 
-function renderPresence(active) {
+function renderPresence(users) {
+  const others = users.filter((p) => !state.user || p.user.id !== state.user.id);
   $('presence').replaceChildren(
-    ...active.map(({ user, role }) => {
+    ...others.map(({ user, role, editing }) => {
       const initials = user.name.split(' ').map((p) => p[0]).join('').slice(0, 2);
       const color = AVATAR_COLORS[[...user.id].reduce((a, c) => a + c.charCodeAt(0), 0) % AVATAR_COLORS.length];
-      const label = `${user.name} is here (${roleLabel[role] || role})`;
-      return el('span', { class: 'avatar', title: label, 'aria-label': label, style: `background:${color}` }, initials);
+      const status = editing ? 'editing' : role === 'viewer' ? 'viewing' : 'here';
+      const label = `${user.name} is ${status === 'here' ? 'here' : status} (${roleLabel[role] || role})`;
+      return el(
+        'span',
+        { class: `presence-chip${editing ? ' editing' : ''}`, title: label, 'aria-label': label },
+        el('span', { class: 'avatar', style: `background:${color}` }, initials),
+        el('span', { class: 'presence-name' }, user.name.split(' ')[0]),
+        el('span', { class: 'presence-status' }, status),
+      );
     }),
   );
 }
 
-function stopPresence() {
-  clearInterval(state.presenceTimer);
-  state.presenceTimer = null;
-  $('presence').replaceChildren();
-}
-
-async function heartbeat() {
-  const doc = state.doc;
-  if (!doc) return;
-  try {
-    const data = await api(docUrl(doc.id, '/presence'), { method: 'POST' });
-    if (state.doc === doc) renderPresence(data.active);
-  } catch {
-    // Presence is best-effort; the event stream reports real access problems.
-  }
-}
-
-function startPresence() {
-  stopPresence();
-  heartbeat();
-  state.presenceTimer = setInterval(heartbeat, 4000);
-}
-
-async function leaveDoc() {
-  const doc = state.doc;
-  if (!doc) return;
-  await drain();
-  disconnect();
-  stopPresence();
-  state.doc = null;
-  fetch(docUrl(doc.id, '/presence'), { method: 'DELETE', keepalive: true }).catch(() => {});
-}
-
 // ---------- open document ----------
 
-async function openDoc(id) {
-  if (state.doc && state.doc.id !== id) await leaveDoc();
-  disconnect();
-  showView('editorView');
+function resetEditorUi() {
   const quill = getQuill();
-  Object.assign(state, { doc: null, broken: false });
+  $('titleInput').value = '';
+  $('titleInput').disabled = true;
+  $('roleBadge').hidden = true;
+  $('shareBtn').hidden = true;
+  $('deleteBtn').hidden = true;
+  $('docMeta').textContent = 'Loading...';
   $('banner').hidden = true;
+  $('presence').replaceChildren();
+  setStatus('');
+  quill.getModule('toolbar').container.hidden = true;
   quill.setContents([], 'silent');
   quill.history.clear();
   quill.enable(false);
-  setStatus('Loading...');
+}
+
+async function openDoc(id) {
+  leaveDoc();
+  const seq = ++state.openSeq;
+  showView('editorView');
+  resetEditorUi();
+  const quill = state.quill;
 
   let data;
   try {
     data = await api(docUrl(id));
   } catch (e) {
-    setStatus('');
-    showBanner(e.message, { danger: true, action: { label: 'Back to documents', onClick: () => (location.hash = '#/') } });
+    if (seq !== state.openSeq) return;
+    $('docMeta').textContent = '';
+    showBanner(e.message, { danger: true, action: backAction });
     return;
   }
+  if (seq !== state.openSeq) return;
 
   let { document: doc, role, owner } = data;
   const canEdit = role !== 'viewer';
@@ -419,14 +442,25 @@ async function openDoc(id) {
       toast(`Could not save imported content: ${e.message}`, true);
       doc = { ...doc, content };
     }
+    if (seq !== state.openSeq) return;
   }
 
-  state.doc = { id: doc.id, role, owner, title: doc.title };
-  state.ot = new OTClient({ Delta, version: doc.version, clientId: state.clientId });
+  const s = {
+    doc: { id: doc.id, role, owner, title: doc.title },
+    ot: new OTClient({ Delta, version: doc.version, clientId: state.clientId }),
+    events: null,
+    sendTimer: null,
+    broken: false,
+    closing: false,
+    closed: false,
+  };
+  state.session = s;
+
   $('titleInput').value = doc.title;
   $('titleInput').disabled = !canEdit;
   $('roleBadge').textContent = roleLabel[role];
   $('roleBadge').className = `badge ${role}`;
+  $('roleBadge').hidden = false;
   $('shareBtn').hidden = role !== 'owner';
   $('deleteBtn').hidden = role !== 'owner';
   $('docMeta').textContent = metaText(owner, doc.updatedAt);
@@ -438,30 +472,29 @@ async function openDoc(id) {
   if (!canEdit) showBanner(`You have view-only access. Ask ${owner.name} for edit access. Changes by others appear live.`);
   setStatus(canEdit ? 'All changes saved' : '');
   if (canEdit && quill.getLength() <= 1) quill.focus();
-  connectEvents(state.doc);
-  startPresence();
+  connectEvents(s);
 }
 
 // ---------- title ----------
 
 async function commitTitle() {
   const input = $('titleInput');
-  const doc = state.doc;
-  if (!doc || doc.role === 'viewer') return;
+  const s = state.session;
+  if (!s || s.doc.role === 'viewer') return;
   const title = input.value.trim();
   if (!title) {
-    input.value = doc.title;
+    input.value = s.doc.title;
     return toast('Title cannot be empty.', true);
   }
-  if (title === doc.title) return;
-  const previous = doc.title;
-  doc.title = title;
+  if (title === s.doc.title) return;
+  const previous = s.doc.title;
+  s.doc.title = title;
   input.value = title;
   try {
-    await api(docUrl(doc.id), { method: 'PATCH', body: { title } });
+    await api(docUrl(s.doc.id), { method: 'PATCH', body: { title } });
   } catch (e) {
-    if (state.doc !== doc) return;
-    doc.title = previous;
+    if (!isActive(s)) return;
+    s.doc.title = previous;
     input.value = previous;
     toast(`Rename failed: ${e.message}`, true);
   }
@@ -473,30 +506,30 @@ $('titleInput').addEventListener('keydown', (e) => {
     e.preventDefault();
     e.target.blur();
   } else if (e.key === 'Escape') {
-    e.target.value = state.doc ? state.doc.title : '';
+    e.target.value = state.session ? state.session.doc.title : '';
     e.target.blur();
   }
 });
 
 $('deleteBtn').addEventListener('click', async () => {
-  const doc = state.doc;
-  if (!doc || !confirm(`Delete "${doc.title}"? This cannot be undone.`)) return;
-  disconnect();
-  stopPresence();
-  state.doc = null;
+  const s = state.session;
+  if (!s || !confirm(`Delete "${s.doc.title}"? This cannot be undone.`)) return;
+  closeSession(s);
+  state.session = null;
   try {
-    await api(docUrl(doc.id), { method: 'DELETE' });
+    await api(docUrl(s.doc.id), { method: 'DELETE' });
     toast('Document deleted');
     location.hash = '#/';
   } catch (e) {
     toast(e.message, true);
-    openDoc(doc.id);
+    openDoc(s.doc.id);
   }
 });
 
 window.addEventListener('beforeunload', (e) => {
-  if (state.ot && !state.ot.idle) {
-    sendBuffer();
+  const s = state.session;
+  if (s && !s.ot.idle) {
+    sendBuffer(s);
     e.preventDefault();
     e.returnValue = '';
   }
@@ -505,31 +538,29 @@ window.addEventListener('beforeunload', (e) => {
 // ---------- sharing ----------
 
 function renderShares(shares) {
-  const doc = state.doc;
+  const { owner } = state.session.doc;
   const list = $('shareList');
-  list.replaceChildren(
-    el('li', {}, el('span', { class: 'who' }, `${doc.owner.name} (${doc.owner.email})`), el('span', { class: 'badge owner' }, 'Owner')),
-  );
-  for (const s of shares) {
+  list.replaceChildren(el('li', {}, el('span', { class: 'who' }, `${owner.name} (${owner.email})`), el('span', { class: 'badge owner' }, 'Owner')));
+  for (const sh of shares) {
     const roleSelect = el(
       'select',
-      { 'aria-label': `Role for ${s.user.name}`, onchange: (e) => share(s.user.email, e.target.value) },
+      { 'aria-label': `Role for ${sh.user.name}`, onchange: (e) => share(sh.user.email, e.target.value) },
       el('option', { value: 'editor' }, 'Can edit'),
       el('option', { value: 'viewer' }, 'Can view'),
     );
-    roleSelect.value = s.role;
+    roleSelect.value = sh.role;
     list.append(
       el(
         'li',
         {},
-        el('span', { class: 'who' }, `${s.user.name} (${s.user.email})`),
+        el('span', { class: 'who' }, `${sh.user.name} (${sh.user.email})`),
         roleSelect,
-        el('button', { class: 'btn btn-danger-ghost', onclick: () => unshare(s.user.id) }, 'Remove'),
+        el('button', { class: 'btn btn-danger-ghost', onclick: () => unshare(sh.user.id) }, 'Remove'),
       ),
     );
   }
 
-  const taken = new Set([doc.owner.id, ...shares.map((s) => s.user.id)]);
+  const taken = new Set([owner.id, ...shares.map((sh) => sh.user.id)]);
   const available = state.users.filter((u) => !taken.has(u.id));
   const select = $('shareUser');
   select.replaceChildren(
@@ -544,7 +575,7 @@ function renderShares(shares) {
 async function share(email, role) {
   $('shareError').hidden = true;
   try {
-    const { shares } = await api(docUrl(state.doc.id, '/shares'), { method: 'PUT', body: { email, role } });
+    const { shares } = await api(docUrl(state.session.doc.id, '/shares'), { method: 'PUT', body: { email, role } });
     renderShares(shares);
     toast('Sharing updated');
   } catch (e) {
@@ -555,7 +586,7 @@ async function share(email, role) {
 
 async function unshare(userId) {
   try {
-    const { shares } = await api(docUrl(state.doc.id, `/shares/${encodeURIComponent(userId)}`), { method: 'DELETE' });
+    const { shares } = await api(docUrl(state.session.doc.id, `/shares/${encodeURIComponent(userId)}`), { method: 'DELETE' });
     renderShares(shares);
     toast('Access removed');
   } catch (e) {
@@ -568,7 +599,7 @@ $('shareBtn').addEventListener('click', async () => {
   try {
     const [{ users }, { shares }] = await Promise.all([
       state.users.length ? { users: state.users } : api('/api/users'),
-      api(docUrl(state.doc.id, '/shares')),
+      api(docUrl(state.session.doc.id, '/shares')),
     ]);
     state.users = users;
     renderShares(shares);
@@ -585,13 +616,14 @@ $('shareForm').addEventListener('submit', (e) => {
 
 // ---------- routing ----------
 
-async function route() {
+function route() {
   if (!state.user) return;
   const m = location.hash.match(/^#\/doc\/(.+)$/);
   if (m) {
     openDoc(decodeURIComponent(m[1]));
   } else {
-    await leaveDoc();
+    leaveDoc();
+    state.openSeq++;
     showList();
   }
 }

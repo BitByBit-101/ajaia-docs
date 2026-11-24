@@ -95,6 +95,9 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
   const shareView = (docId) =>
     store.listShares(docId).map((s) => ({ user: store.getUser(s.userId), role: s.role }));
 
+  const membersExcept = (doc, userId) =>
+    [doc.ownerId, ...store.listShares(doc.id).map((s) => s.userId)].filter((id) => id !== userId);
+
   // ---- Auth (mocked: seeded users, no passwords) ----
   app.post('/api/login', (req, res) => {
     const user = store.getUserByEmail(req.body && req.body.email);
@@ -176,14 +179,17 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     if (!Object.keys(patch).length) throw new HttpError(400, 'Nothing to update.');
     const doc = store.updateDocument(req.doc.id, patch);
     if (patch.content) hub.reset(doc.id);
-    if (patch.title) hub.broadcastTitle(doc.id, doc.title);
+    if (patch.title) {
+      hub.broadcastTitle(doc.id, doc.title);
+      hub.notifyUsers(membersExcept(doc, req.user.id));
+    }
     res.json({ document: doc, role: req.role });
   });
 
   // ---- Real-time collaboration (OT over HTTP + Server-Sent Events) ----
   app.post('/api/documents/:id/ops', requireUser, loadDoc('editor'), (req, res) => {
     const { baseVersion, ops, clientId, seq } = req.body || {};
-    const entry = hub.submit(req.doc, { baseVersion, ops, clientId, seq });
+    const entry = hub.submit(req.doc, { baseVersion, ops, clientId, seq, userId: req.user.id });
     res.json({ version: entry.version });
   });
 
@@ -191,9 +197,17 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     hub.subscribe(req.doc, req, res);
   });
 
+  app.get('/api/documents/:id/presence', requireUser, loadDoc('viewer'), (req, res) => {
+    res.json({ users: hub.presence(req.doc.id) });
+  });
+
+  app.get('/api/events', requireUser, (req, res) => hub.subscribeUser(req, res));
+
   app.delete('/api/documents/:id', requireUser, loadDoc('owner'), (req, res) => {
+    const notify = membersExcept(req.doc, req.user.id);
     hub.closeAll(req.doc.id);
     store.deleteDocument(req.doc.id);
+    hub.notifyUsers(notify, { message: `${req.user.name} deleted "${req.doc.title}".` });
     res.status(204).end();
   });
 
@@ -208,42 +222,24 @@ function createApp({ store, secret = crypto.randomBytes(32).toString('hex'), sec
     const target = store.getUserByEmail(email);
     if (!target) throw new HttpError(404, 'No user with that email.');
     if (target.id === req.doc.ownerId) throw new HttpError(400, 'The owner already has full access.');
+    const previous = store.getRole(req.doc, target.id);
     store.upsertShare(req.doc.id, target.id, role);
     // Open editors reconnect so the new role takes effect immediately.
-    hub.closeUser(req.doc.id, target.id, 'reload');
+    if (previous !== role) hub.closeUser(req.doc.id, target.id, 'reload');
+    const label = role === 'editor' ? 'can edit' : 'can view';
+    hub.notifyUsers([target.id], {
+      message: previous
+        ? `Your access to "${req.doc.title}" changed: you ${label}.`
+        : `${req.user.name} shared "${req.doc.title}" with you (${label}).`,
+    });
     res.json({ shares: shareView(req.doc.id) });
   });
 
   app.delete('/api/documents/:id/shares/:userId', requireUser, loadDoc('owner'), (req, res) => {
     if (!store.removeShare(req.doc.id, req.params.userId)) throw new HttpError(404, 'Share not found.');
     hub.closeUser(req.doc.id, req.params.userId, 'gone');
+    hub.notifyUsers([req.params.userId], { message: `Your access to "${req.doc.title}" was removed.` });
     res.json({ shares: shareView(req.doc.id) });
-  });
-
-  // Presence is ephemeral (in memory): docId -> Map(userId -> lastSeen ms).
-  const presence = new Map();
-  const PRESENCE_TTL_MS = 12000;
-
-  app.post('/api/documents/:id/presence', requireUser, loadDoc('viewer'), (req, res) => {
-    const now = Date.now();
-    let seen = presence.get(req.doc.id);
-    if (!seen) presence.set(req.doc.id, (seen = new Map()));
-    seen.set(req.user.id, now);
-    const active = [];
-    for (const [userId, at] of seen) {
-      if (now - at > PRESENCE_TTL_MS) seen.delete(userId);
-      else if (userId !== req.user.id) {
-        const user = store.getUser(userId);
-        if (user) active.push({ user, role: store.getRole(req.doc, userId) });
-      }
-    }
-    res.json({ active, version: req.doc.version, title: req.doc.title });
-  });
-
-  app.delete('/api/documents/:id/presence', requireUser, (req, res) => {
-    const seen = presence.get(req.params.id);
-    if (seen) seen.delete(req.user.id);
-    res.status(204).end();
   });
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
