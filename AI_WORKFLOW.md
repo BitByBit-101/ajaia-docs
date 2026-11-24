@@ -7,7 +7,7 @@
 ## Where AI materially sped things up
 - **Scope to plan in minutes.** I had the AI turn the brief into a concrete stack, an API surface, and a list of cuts, which I then edited.
 - **Boilerplate with sharp edges:** HMAC cookie signing with a timing-safe compare, multer and error-middleware wiring, and the import pipeline (marked/mammoth/sanitize-html).
-- **Test suite:** 12 end-to-end API tests against a real server instance (auth, forged cookie, CRUD with formatting round-trip, validation, conflicts, the full role matrix, import sanitization, presence, concurrent OT merges, a live SSE stream, disk persistence), plus a randomized OT fuzz test.
+- **Test suite:** 14 end-to-end API tests against a real server instance (auth, forged cookie, CRUD with formatting round-trip, validation, conflicts, the full role matrix, import sanitization, live presence and editing state, share notifications, concurrent OT merges, remote cursor shifting, a live SSE stream, disk persistence), plus a randomized OT fuzz test.
 - **Real-time co-editing:** the AI drafted the OT client/server protocol quickly. I spent my review time on the ordering and failure cases rather than on boilerplate.
 - **UI verification:** the agent drove the running app through Playwright. It created a doc, applied formatting, reloaded to confirm persistence, imported Markdown, shared with Bob, switched users, and confirmed view-only mode.
 
@@ -31,8 +31,9 @@
 - **Changed no-access responses from `403` to `404`.** This stops anyone from probing whether a document ID exists.
 
 ## How I verified correctness
-- `npm test`: 13 tests pass, including 200 randomized seeds where 3 clients edit concurrently and must end identical to the server.
+- `npm test`: 15 tests pass, including 200 randomized seeds where 3 clients edit concurrently and must end identical to the server.
 - Two-editor browser check: two live editors on the same doc, both typing at the same time (one at the top, one at the end). Both editors and the server ended with identical content.
+- **Measured before optimizing.** When saves felt slow on the live site, I had the AI write a probe that timed each edit on the deployment (using a scratch doc that it then deleted). The server took about 3 ms and an edit reached the other user in about 300 ms, which is one network round trip. So the fixes were client-side: send immediately, one connection per tab, and show "Saving..." only when a save is actually slow. I didn't touch the server.
 - Manual and agent-driven browser runs of every core flow (listed above), including the error paths: an unsupported file type, editing as a viewer, an empty title.
 - Read through all generated code for security issues: output is built with `textContent` (no `innerHTML` with user data), uploads are sanitized, cookies are HttpOnly + SameSite=Lax (+ Secure in production), and request sizes are capped.
 - UX check: save-status text, toasts for errors, a view-only banner, a disabled toolbar and title for viewers, and a confirmation before delete.

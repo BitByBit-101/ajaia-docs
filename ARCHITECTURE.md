@@ -31,10 +31,27 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 7. **Presence and notifications are pushed, not polled.** Presence comes from the open event streams, so join and leave are instant. A user is marked **editing** for 2.5 s after each change, and the server broadcasts only when that state flips. A per-user stream (`/api/events`) pushes "shared with you", role changes, removals, renames, and deletions, so dashboards update without refresh. Leaving a document detaches its session from the UI immediately; unsent edits finish in the background, so navigation never waits on the network.
 8. **Validation at the boundary:** title length and emptiness, Delta shape (op types, counts, and attributes), document size cap, JSON body size (2 MB), upload size (2 MB), file-extension allowlist, `.docx` magic-byte check, and share role allowlist. Errors return consistent `{error}` JSON, which the UI shows as toasts or inline messages.
 
+## Performance
+
+Measured on the live Render deployment (free tier, US region) from India:
+
+| Step | Time |
+|------|------|
+| Server processing per edit | ~3 ms |
+| Edit reaches another user's screen | ~280–330 ms (one network round trip) |
+
+Client choices that keep it at one round trip:
+- **Edits are sent immediately** via a microtask, not a debounce timer. Keys typed while one change is in flight batch into the next, so a fast typist sends a few requests per second, not one per key.
+- **One live connection per tab.** Browsers allow 6 HTTP/1.1 connections per site. The dashboard notification stream is open only on the dashboard, so multiple tabs can't starve saves of connections.
+- **"Saving..." appears only if a save takes longer than 0.7 s**, so the status doesn't flicker on every keystroke.
+- **Navigation never waits on the network.** The editor clears immediately to a loading state, so stale content is never shown.
+
+The remaining latency is geographic. Hosting in a region near the users (for example Render's Singapore region for India) would cut it to about 60–100 ms.
+
 ## How correctness is tested
 
 - `test/ot-fuzz.test.js` runs 200 randomized scenarios. In each, 3 simulated clients make random inserts, deletes, and formatting changes concurrently against the real server hub, with random message delivery timing and duplicate retries. It asserts that every client ends byte-identical to the server.
-- `test/api.test.js` covers the HTTP layer end to end, including a real SSE stream and a two-user same-version edit that must merge to `"Hello brave world!"`.
+- `test/api.test.js` covers the HTTP layer end to end, including a real SSE stream, a two-user same-version edit that must merge to `"Hello brave world!"`, live presence with the editing state, share notifications, and cursor positions that shift correctly as others edit.
 
 ## Deliberately cut
 
@@ -43,7 +60,7 @@ Ship a coherent, testable slice of a Google Docs-like editor within about 4–6 
 | Comment threads and suggestion mode | Valuable, but a separate feature area. |
 | Real auth (passwords, OAuth) | The brief allows mocking it. Seeded users make the reviewer flow faster. |
 | Sharing with arbitrary emails / invites | Sharing is limited to existing (seeded) users. |
-| Comments, version history, export | Optional stretch items, not core. |
+| Version history, export | Optional stretch items, not core. |
 | Images or tables in the editor | Need file storage and a more complex schema. |
 | Persistent storage on the free host | Documented trade-off; see below. |
 

@@ -28,6 +28,7 @@ Click a user on the sign-in screen. Use **Switch user** (top right) to change ac
 - **Live cursors:** see other people's caret and selection in their color with a name label. Cursors stay attached to the right text as anyone edits.
 - **Live sharing:** when someone shares a doc with you, changes your role, or removes access, you get a notification and your dashboard updates without a refresh.
 - **Resilience:** retried sends are idempotent. A dropped connection reconnects and replays missed changes. If a client falls too far behind, it reloads the latest version instead of corrupting the document.
+- **Responsiveness:** edits are sent the moment you type (keystrokes typed while a save is in flight are batched). Each tab holds a single live connection, and switching documents is instant. On the live site, an edit reaches other users in one network round trip (about 0.3 s from India to Render's US region; server processing is about 3 ms).
 - **Sample files** for import demos live in `samples/` (`.docx`, `.md`, `.txt`, and an unsupported `.pdf`).
 
 ## Run locally
@@ -37,7 +38,7 @@ Requires Node.js 20+.
 ```bash
 npm install
 npm start           # http://localhost:3000
-npm test            # API + persistence tests (node:test, no extra deps)
+npm test            # 15 tests: API, real-time, sharing, persistence + 200-scenario OT fuzz (node:test)
 ```
 
 Data is stored in `data/db.json`, which is created and seeded with demo data on first run. Delete that file to reset.
